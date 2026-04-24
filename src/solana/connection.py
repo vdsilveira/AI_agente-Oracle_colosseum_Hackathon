@@ -1,20 +1,30 @@
 """Solana connection and CPI instructions."""
 
-from typing import Optional
+import asyncio
+import hashlib
 from pathlib import Path
+from typing import Optional
+from solders.pubkey import Pubkey
+from solders.keypair import Keypair
+from solders.instruction import Instruction, AccountMeta
+from solders.transaction import Transaction
 from solana.rpc.api import Client
-from solana.rpc.commitment import Confirmed
-from solana.keypair import Keypair
-from solana.transaction import Transaction
-from solana.rpc.types import TxOpts
+
+from .mcp_client import SolanaMCPClient
+
+
+PROGRAM_ID = "4RAbxbEVCsYaaK3WR8r7eYwrofTJ7yqdZ3hqSYRLPfT4"
 
 
 class SolanaConnection:
     """Solana connection manager."""
 
     def __init__(self, rpc_url: str, keypair_path: str):
+        self.rpc_url = rpc_url
         self.client = Client(rpc_url)
         self.keypair = self._load_keypair(keypair_path)
+        self.mcp_client = SolanaMCPClient(rpc_url, PROGRAM_ID)
+        self.program_id = Pubkey.from_string(PROGRAM_ID)
 
     def _load_keypair(self, path: str) -> Keypair:
         """Load oracle keypair from file."""
@@ -35,21 +45,120 @@ class SolanaConnection:
         """Get oracle public key."""
         return self.keypair.public_key
 
+    @property
+    def oracle_pubkey(self) -> Pubkey:
+        """Get oracle public key as Pubkey."""
+        return Pubkey.from_bytes(self.keypair.public_key.to_bytes())
+
+    def _find_pda(self, *seeds) -> tuple[Pubkey, int]:
+        """Find PDA with bump seed."""
+        return Pubkey.find_program_address(list(seeds), self.program_id)
+
+    async def get_global_config(self) -> dict:
+        """Get GlobalConfig account."""
+        pda, _ = self._find_pda(b"global_config_v1")
+        return await self.mcp_client.get_account_info(str(pda))
+
     async def get_account_info(self, pubkey: str) -> dict:
         """Get account info."""
-        return await self.client.get_account_info(pubkey)
+        return await self.mcp_client.get_account_info(pubkey)
 
-    async def get_program_accounts(self, program_id: str) -> list:
+    async def get_program_accounts(self, program_id: str = None) -> list:
         """Get all accounts owned by program."""
-        return await self.client.get_program_accounts(program_id)
+        return await self.mcp_client.get_program_accounts(program_id)
+
+    async def get_active_pools(self) -> list:
+        """Get active (Open) pools."""
+        return await self.mcp_client.get_active_pools()
+
+    async def get_entries_for_pool(self, pool_pda: str) -> list:
+        """Get participant entries for a pool."""
+        return await self.mcp_client.get_entries_for_pool(pool_pda)
+
+    async def get_entry_pda(self, pool_pda: str, clip_link: str) -> tuple[str, int]:
+        """Get ParticipantEntry PDA for a clip link."""
+        link_hash = hashlib.sha256(clip_link.encode()).digest()
+        pool_bytes = Pubkey.from_string(pool_pda).to_bytes()
+        return self._find_pda(b"entry", pool_bytes, link_hash)
+
+    async def get_user_profile_pda(self, authority: str) -> tuple[str, int]:
+        """Get UserProfile PDA."""
+        authority_bytes = Pubkey.from_string(authority).to_bytes()
+        return self._find_pda(b"user_profile", authority_bytes)
+
+    async def get_stake_account_pda(self, authority: str) -> tuple[str, int]:
+        """Get StakeAccount PDA."""
+        authority_bytes = Pubkey.from_string(authority).to_bytes()
+        return self._find_pda(b"stake", authority_bytes)
+
+    async def get_creator_channels(self, creator_authority: str) -> list[str]:
+        """Busca channel_ids do UserProfile do criador on-chain.
+        
+        O créateur deve ter chamado initializeUser() antes de criar a pool.
+        O oracle lê os canais registrados no UserProfile para validar entries.
+        """
+        from ..config import config
+        try:
+            profile = await self.get_user_profile(creator_authority)
+            return profile.get("channel_ids", [])
+        except Exception as e:
+            from loguru import logger
+            logger.warning(f"Failed to get creator channels for {creator_authority}: {e}")
+            return []
+
+    async def get_user_profile(self, authority: str) -> dict:
+        """Busca UserProfile de um usuário.
+        
+        Args:
+            authority: wallet address do usuário
+        
+        Returns:
+            dict com campos: authority, channel_ids, is_banned, bump
+        """
+        pda, _ = await self.get_user_profile_pda(authority)
+        return await self.mcp_client.get_account_info(pda)
+
+    async def get_treasury(self) -> str:
+        """Busca treasury address do GlobalConfig."""
+        try:
+            config = await self.get_global_config()
+            return config.get("treasury", "")
+        except Exception:
+            return ""
+
+    async def get_pool_creator(self, pool_pda: str) -> str:
+        """Busca creator de uma pool."""
+        try:
+            pool = await self.get_account_info(pool_pda)
+            return pool.get("creator", "")
+        except Exception:
+            return ""
 
 
 class OracleCPI:
-    """Execute CPI instructions as oracle."""
+    """Execute CPI instructions as oracle using anchorpy."""
 
-    def __init__(self, connection: SolanaConnection, program_id: str):
+    def __init__(self, connection: SolanaConnection, program_id: str = None):
         self.connection = connection
-        self.program_id = program_id
+        self.program_id = program_id or PROGRAM_ID
+        self._program = None
+
+    async def _get_program(self):
+        """Lazy load anchorpy program."""
+        if self._program is None:
+            try:
+                from anchorpy import Program, Provider, Idl
+                client = Client(self.connection.rpc_url)
+                from anchorpy.wallet import Wallet
+                wallet = Wallet(self.connection.keypair)
+                provider = Provider(client, wallet)
+                idl = await Idl.fetch(self.connection.program_id, provider)
+                from solders.pubkey import Pubkey
+                program_pubkey = Pubkey.from_string(self.program_id)
+                self._program = Program(idl, program_pubkey, provider)
+            except ImportError:
+                return None
+        return self._program
 
     async def update_metrics(
         self,
@@ -58,36 +167,309 @@ class OracleCPI:
         views: int,
         likes: int,
         comments: int,
+        link_hash: Optional[bytes] = None,
     ) -> str:
+        """Call update_metrics instruction.
+        
+        Args:
+            entry_pda: ParticipantEntry address
+            pool_pda: VideoPool address
+            views: view count
+            likes: like count
+            comments: comment count
+            link_hash: 32-byte hash of clip_link
+        
+        Returns:
+            Transaction signature
         """
-        Call update_metrics instruction.
-
-        Returns transaction signature.
-        """
-        from solana.system_program import CreateAccountParams, SystemProgram
-        from solana.transaction import AccountMeta
-
-        builder = (
-            Transaction()
-            .add(
-                SystemProgram.transfer(
-                    {"from_pubkey": self.connection.public_key, "to_pubkey": entry_pda, "lamports": 1}
-                )
+        program = await self._get_program()
+        if program is None:
+            return await self._update_metrics_rpc(
+                entry_pda, pool_pda, views, likes, comments, link_hash
             )
+        
+        conn = self.connection
+        entry = Pubkey.from_string(entry_pda)
+        pool = Pubkey.from_string(pool_pda)
+        
+        if link_hash is None:
+            link_hash = b"\x00" * 32
+        
+        tx = program.transaction["update_metrics"](
+            views,
+            likes,
+            comments,
+            list(link_hash),
+            accounts={
+                "entry": entry,
+                "pool": pool,
+                "config": Pubkey.from_string("J45dp2TMQXx5v5RDygsF3im7URJqu7QQ996V1kqXeNxN"),
+                "oracle": conn.oracle_pubkey,
+            }
         )
+        
+        tx_sig = await conn.client.send_transaction(tx, conn.keypair)
+        return str(tx_sig.value)
 
-        return "mock-tx-sig"
+    async def _update_metrics_rpc(
+        self,
+        entry_pda: str,
+        pool_pda: str,
+        views: int,
+        likes: int,
+        comments: int,
+        link_hash: Optional[bytes] = None,
+    ) -> str:
+        """Fallback update_metrics via RPC instruction."""
+        import base64
+        from solders.instruction import Instruction, AccountMeta
+        
+        if link_hash is None:
+            link_hash = b"\x00" * 32
+        
+        program_id = Pubkey.from_string(self.program_id)
+        entry = Pubkey.from_string(entry_pda)
+        pool = Pubkey.from_string(pool_pda)
+        config = Pubkey.from_string("J45dp2TMQXx5v5RDygsF3im7URJqu7QQ996V1kqXeNxN")
+        
+        data = bytes([0x12, 0x00, 0x00, 0x00])
+        data += views.to_bytes(8, "little")
+        data += likes.to_bytes(8, "little")
+        data += comments.to_bytes(8, "little")
+        data += link_hash
+        
+        instruction = Instruction(
+            program_id=program_id,
+            data=data,
+            accounts=[
+                AccountMeta(entry, True, True),
+                AccountMeta(pool, True, True),
+                AccountMeta(config, False, False),
+                AccountMeta(self.connection.oracle_pubkey, False, True),
+            ]
+        )
+        
+        tx = Transaction().add(instruction)
+        tx.sign(self.connection.keypair)
+        
+        try:
+            result = await self.connection.client.send_transaction(
+                tx, self.connection.keypair
+            )
+            return str(result.value)
+        except Exception as e:
+            return f"tx-error: {e}"
 
     async def slash_user(
         self,
-        user_profile_pda: str,
-        stake_account_pda: str,
-        treasury_pda: str,
-        reason: str,
+        user_authority: str,
     ) -> str:
+        """Call slash_user instruction (for fraud detection).
+        
+        Args:
+            user_authority: Wallet address of user to ban
+        
+        Returns:
+            Transaction signature
         """
-        Call slash_user instruction (for fraud detection).
+        program = await self._get_program()
+        if program is None:
+            return await self._slash_user_rpc(user_authority)
+        
+        conn = self.connection
+        user_authority_pk = Pubkey.from_string(user_authority)
+        
+        user_profile, _ = Pubkey.find_program_address(
+            [b"user_profile", user_authority_pk.to_bytes()],
+            conn.program_id
+        )
+        stake_account, _ = Pubkey.find_program_address(
+            [b"stake", user_authority_pk.to_bytes()],
+            conn.program_id
+        )
+        
+        config_pda, _ = conn._find_pda(b"global_config_v1")
+        
+        tx = program.transaction["slash_user"](
+            accounts={
+                "config": config_pda,
+                "user_profile": user_profile,
+                "stake_account": stake_account,
+                "treasury": Pubkey.from_string(" treasury_address "),
+                "caller": conn.oracle_pubkey,
+            }
+        )
+        
+        tx_sig = await conn.client.send_transaction(tx, conn.keypair)
+        return str(tx_sig.value)
 
-        Returns transaction signature.
+    async def _slash_user_rpc(self, user_authority: str) -> str:
+        """Fallback slash_user via RPC instruction."""
+        from solders.instruction import Instruction, AccountMeta
+        
+        program_id = Pubkey.from_string(self.program_id)
+        user_authority_pk = Pubkey.from_string(user_authority)
+        
+        user_profile, _ = Pubkey.find_program_address(
+            [b"user_profile", user_authority_pk.to_bytes()],
+            program_id
+        )
+        stake_account, _ = Pubkey.find_program_address(
+            [b"stake", user_authority_pk.to_bytes()],
+            program_id
+        )
+        
+        config, _ = Pubkey.find_program_address([b"global_config_v1"], program_id)
+        
+        data = bytes([0x10, 0x00, 0x00, 0x00])
+        
+        instruction = Instruction(
+            program_id=program_id,
+            data=data,
+            accounts=[
+                AccountMeta(config, False, False),
+                AccountMeta(user_profile, True, True),
+                AccountMeta(stake_account, True, True),
+                AccountMeta(Pubkey.from_string("treasury_address"), True, True),
+                AccountMeta(self.connection.oracle_pubkey, False, True),
+            ]
+        )
+        
+        tx = Transaction().add(instruction)
+        tx.sign(self.connection.keypair)
+        
+        try:
+            result = await self.connection.client.send_transaction(
+                tx, self.connection.keypair
+            )
+            return str(result.value)
+        except Exception as e:
+            return f"tx-error: {e}"
+
+    async def close_and_payout(
+        self,
+        pool_pda: str,
+    ) -> str:
+        """Call close_and_payout instruction.
+        
+        Args:
+            pool_pda: VideoPool address
+        
+        Returns:
+            Transaction signature
         """
-        return "mock-slash-tx-sig"
+        program = await self._get_program()
+        if program is None:
+            return await self._close_and_payout_rpc(pool_pda)
+        
+        conn = self.connection
+        pool = Pubkey.from_string(pool_pda)
+        
+        vault, _ = Pubkey.find_program_address(
+            [b"vault", pool.to_bytes()],
+            conn.program_id
+        )
+        
+        config_pda, _ = conn._find_pda(b"global_config_v1")
+        creator = Pubkey.from_string("creator_address")
+        treasury = Pubkey.from_string("treasury_address")
+        
+        tx = program.transaction["close_and_payout"](
+            accounts={
+                "pool": pool,
+                "prize_vault": vault,
+                "creator": creator,
+                "caller": conn.oracle_pubkey,
+                "config": config_pda,
+                "treasury": treasury,
+                "system_program": Pubkey.from_string("11111111111111111111111111111111"),
+            }
+        )
+        
+        tx_sig = await conn.client.send_transaction(tx, conn.keypair)
+        return str(tx_sig.value)
+
+    async def _close_and_payout_rpc(self, pool_pda: str) -> str:
+        """Fallback close_and_payout via RPC instruction."""
+        from solders.instruction import Instruction, AccountMeta
+        
+        program_id = Pubkey.from_string(self.program_id)
+        pool = Pubkey.from_string(pool_pda)
+        
+        vault, _ = Pubkey.find_program_address(
+            [b"vault", pool.to_bytes()],
+            program_id
+        )
+        
+        config, _ = Pubkey.find_program_address([b"global_config_v1"], program_id)
+        
+        data = bytes([0x05, 0x00, 0x00, 0x00])
+        
+        instruction = Instruction(
+            program_id=program_id,
+            data=data,
+            accounts=[
+                AccountMeta(pool, True, True),
+                AccountMeta(vault, True, True),
+                AccountMeta(Pubkey.from_string("creator_address"), True, True),
+                AccountMeta(self.connection.oracle_pubkey, True, True),
+                AccountMeta(config, False, False),
+                AccountMeta(Pubkey.from_string("treasury_address"), True, True),
+                AccountMeta(Pubkey.from_string("11111111111111111111111111111111"), False, False),
+            ]
+        )
+        
+        tx = Transaction().add(instruction)
+        tx.sign(self.connection.keypair)
+        
+        try:
+            result = await self.connection.client.send_transaction(
+                tx, self.connection.keypair
+            )
+            return str(result.value)
+        except Exception as e:
+            return f"tx-error: {e}"
+
+
+def calculate_score(
+    views: int,
+    likes: int,
+    comments: int,
+    scoring_rules: dict,
+) -> int:
+    """Calculate weighted score using pool's scoring rules.
+    
+    scoring_rules:
+    - views_weight: u16 (ex: 5000 = 50%)
+    - likes_weight: u16 (ex: 3000 = 30%)
+    - comments_weight: u16 (ex: 2000 = 20%)
+    
+    SCORE_BASE = 10_000 (100%)
+    """
+    views_weight = scoring_rules.get("views_weight", 5000)
+    likes_weight = scoring_rules.get("likes_weight", 3000)
+    comments_weight = scoring_rules.get("comments_weight", 2000)
+    
+    score = (
+        (views * views_weight) +
+        (likes * likes_weight) +
+        (comments * comments_weight)
+    ) // 10000
+    
+    return score
+
+
+async def create_oracle_connection(
+    rpc_url: str = "https://api.devnet.solana.com",
+    keypair_path: str = "keys/oracle.json",
+) -> SolanaConnection:
+    """Create OracleConnection with validation."""
+    from ..config import config
+    
+    path = config.ORACLE_KEYPAIR_PATH if keypair_path == "keys/oracle.json" else keypair_path
+    return SolanaConnection(rpc_url, path)
+
+
+async def create_oracle_cpi(connection: SolanaConnection) -> OracleCPI:
+    """Create OracleCPI instance."""
+    return OracleCPI(connection)

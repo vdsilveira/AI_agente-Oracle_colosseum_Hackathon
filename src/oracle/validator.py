@@ -50,9 +50,18 @@ class OracleValidator:
             result.channel_id = channel_id
 
             if not is_valid_channel:
-                logger.warning(f"Channel {channel_id} not in creator's channels")
-                result.status = ValidationStatus.FRAUD
-                result.reason = f"Video channel {channel_id} not owned by creator"
+                logger.warning(f"Channel {channel_id} not in creator's channels: {creator_channels}")
+                
+                is_known = self.channel_service.is_known_creator_channel(channel_id)
+                
+                if is_known:
+                    result.status = ValidationStatus.WRONG_CHANNEL
+                    result.reason = f"Video posted on creator's other channel: {channel_id}"
+                    logger.warning(f"WRONG_CHANNEL: Entry from known channel {channel_id}")
+                else:
+                    result.status = ValidationStatus.FRAUD
+                    result.reason = f"Video channel {channel_id} not owned by creator or any known creator"
+                    logger.warning(f"FRAUD DETECTED: Channel {channel_id} is unknown")
                 return result
 
             transcript_a = self.transcript_service.get_transcript(video_a_id)

@@ -26,7 +26,9 @@ class Config:
 
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///oracle.db")
 
-    PROGRAM_ID: str = os.getenv("PROGRAM_ID", "")
+    PROGRAM_ID: str = os.getenv("PROGRAM_ID", "4RAbxbEVCsYaaK3WR8r7eYwrofTJ7yqdZ3hqSYRLPfT4")
+
+    ALERT_WEBHOOK_URL: str = os.getenv("ALERT_WEBHOOK_URL", "")
 
     @classmethod
     def validate(cls) -> bool:

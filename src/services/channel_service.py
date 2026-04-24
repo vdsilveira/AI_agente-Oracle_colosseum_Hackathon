@@ -62,3 +62,28 @@ class ChannelService:
 
         is_valid = channel_id in creator_channels
         return is_valid, channel_id
+
+    def verify_video_channel(
+        self,
+        video_url: str,
+        creator_channels: list[str]
+    ) -> tuple[bool, Optional[str]]:
+        """Alias for verify_channel for API compatibility."""
+        return self.verify_channel(video_url, creator_channels)
+
+    def is_known_creator_channel(self, channel_id: str) -> bool:
+        """
+        Verifica se channel_id pertence a algum criador registrado no sistema.
+        
+        Consulta o banco de dados local para verificar se o canal
+        já foi registrado por algum criador (initializeUser on-chain).
+        
+        Returns:
+            True se o canal pertence a um criador conhecido
+        """
+        try:
+            from ..db.database import Database
+            db = Database()
+            return db.is_channel_registered(channel_id)
+        except Exception:
+            return False
