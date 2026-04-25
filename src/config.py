@@ -12,7 +12,8 @@ class Config:
 
     JWT_TOKEN: str = os.getenv("JWT_TOKEN", "")
     SOLANA_RPC_URL: str = os.getenv("SOLANA_RPC_URL", "https://api.devnet.solana.com")
-    ORACLE_KEYPAIR_PATH: str = os.getenv("ORACLE_KEYPAIR_PATH", "./keys/oracle.json")
+    ORACLE_PUBLIC_KEY: str = os.getenv("ORACLE_PUBLIC_KEY", "")
+    ORACLE_PRIVATE_KEY: str = os.getenv("ORACLE_PRIVATE_KEY", "")
 
     METRICS_API_URL: str = os.getenv("METRICS_API_URL", "https://backend-views-solana.onrender.com")
     METRICS_API_KEY: str = os.getenv("METRICS_API_KEY", "")
@@ -37,12 +38,10 @@ class Config:
             raise ValueError("JWT_TOKEN is required in .env")
         if not cls.SOLANA_RPC_URL:
             raise ValueError("SOLANA_RPC_URL is required in .env")
-        if not cls.ORACLE_KEYPAIR_PATH:
-            raise ValueError("ORACLE_KEYPAIR_PATH is required in .env")
-
-        keypath = Path(cls.ORACLE_KEYPAIR_PATH)
-        if not keypath.exists():
-            raise FileNotFoundError(f"Oracle keypair not found at {keypath}")
+        if not cls.ORACLE_PUBLIC_KEY:
+            raise ValueError("ORACLE_PUBLIC_KEY is required in .env")
+        if not cls.ORACLE_PRIVATE_KEY:
+            raise ValueError("ORACLE_PRIVATE_KEY is required in .env")
 
         return True
 

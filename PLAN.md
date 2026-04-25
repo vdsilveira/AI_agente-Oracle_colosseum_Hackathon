@@ -306,13 +306,14 @@ AI_agente-Oracle_colosseum_Hackathon/
 
 ```env
 # JWT Token para API de métricas
-JWT_TOKEN=f0a84c40027bfa649d3a41c261c227bf24221a2161be704305a9156c56554fb3
+JWT_TOKEN=your_jwt_token_here
 
 # Solana Devnet
 SOLANA_RPC_URL=https://api.devnet.solana.com
 
-# Oracle Keypair
-ORACLE_KEYPAIR_PATH=./keys/oracle.json
+# Oracle Keys
+ORACLE_PUBLIC_KEY=your_oracle_public_key_here
+ORACLE_PRIVATE_KEY=your_oracle_private_key_here
 
 # Thresholds
 TRANSCRIPT_MIN_SCORE=0.70
@@ -320,8 +321,8 @@ FRAME_SIMILARITY_THRESHOLD=0.70
 FRAME_MIN_MATCHES=3
 FRAME_TOTAL_SAMPLES=5
 
-# Polling
-POLL_INTERVAL_SECONDS=300
+# Polling (3 horas)
+POLL_INTERVAL_SECONDS=10800
 
 # Database
 DATABASE_URL=sqlite:///oracle.db

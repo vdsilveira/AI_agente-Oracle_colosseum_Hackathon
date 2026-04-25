@@ -5,6 +5,8 @@ from typing import Optional
 import httpx
 from solders.pubkey import Pubkey
 
+from ..config import config
+
 
 class SolanaMCPClient:
     """Cliente para interagir com Solana via RPC HTTP.
@@ -19,10 +21,10 @@ class SolanaMCPClient:
     def __init__(
         self,
         rpc_url: str = "https://api.devnet.solana.com",
-        program_id: str = "4RAbxbEVCsYaaK3WR8r7eYwrofTJ7yqdZ3hqSYRLPfT4"
+        program_id: str = None
     ):
         self.rpc_url = rpc_url
-        self.program_id = program_id
+        self.program_id = program_id or config.PROGRAM_ID
         
     async def _rpc_call(self, method: str, params: list) -> dict:
         """Executa JSON-RPC call via HTTP."""
@@ -232,7 +234,7 @@ class SolanaMCPClientLocal:
     def __init__(self, mcp_server_name: str = "solana"):
         self.mcp_server_name = mcp_server_name
         self.rpc_url = "https://api.devnet.solana.com"
-        self.program_id = "4RAbxbEVCsYaaK3WR8r7eYwrofTJ7yqdZ3hqSYRLPfT4"
+        self.program_id = config.PROGRAM_ID
     
     async def get_account_info(self, pubkey: str) -> dict:
         """Busca info via MCP.

@@ -11,34 +11,32 @@ from solders.transaction import Transaction
 from solana.rpc.api import Client
 
 from .mcp_client import SolanaMCPClient
+from ..config import config
 
 
-PROGRAM_ID = "4RAbxbEVCsYaaK3WR8r7eYwrofTJ7yqdZ3hqSYRLPfT4"
+PROGRAM_ID = config.PROGRAM_ID
 
 
 class SolanaConnection:
     """Solana connection manager."""
 
-    def __init__(self, rpc_url: str, keypair_path: str):
+    def __init__(self, rpc_url: str, keypair_path: str = None):
         self.rpc_url = rpc_url
         self.client = Client(rpc_url)
         self.keypair = self._load_keypair(keypair_path)
-        self.mcp_client = SolanaMCPClient(rpc_url, PROGRAM_ID)
-        self.program_id = Pubkey.from_string(PROGRAM_ID)
+        self.mcp_client = SolanaMCPClient(rpc_url, config.PROGRAM_ID)
+        self.program_id = Pubkey.from_string(config.PROGRAM_ID)
 
-    def _load_keypair(self, path: str) -> Keypair:
-        """Load oracle keypair from file."""
-        keypath = Path(path)
-        if not keypath.exists():
-            raise FileNotFoundError(f"Keypair not found at {path}")
-
-        with open(keypath) as f:
-            keypair_data = f.read().strip()
-
-        if keypair_data.startswith("["):
-            return Keypair.from_json(keypair_data)
-        else:
-            return Keypair.from_secret_key(bytes.fromhex(keypair_data))
+    def _load_keypair(self, path: str = None) -> Keypair:
+        """Load oracle keypair from config environment variables."""
+        private_key = config.ORACLE_PRIVATE_KEY
+        if not private_key:
+            raise ValueError("ORACLE_PRIVATE_KEY is required in .env")
+        
+        try:
+            return Keypair.from_base58_string(private_key)
+        except Exception as e:
+            raise ValueError(f"Invalid private key: {e}")
 
     @property
     def public_key(self):
@@ -195,6 +193,8 @@ class OracleCPI:
         if link_hash is None:
             link_hash = b"\x00" * 32
         
+        config_pda, _ = conn._find_pda(b"global_config_v1")
+        
         tx = program.transaction["update_metrics"](
             views,
             likes,
@@ -203,7 +203,7 @@ class OracleCPI:
             accounts={
                 "entry": entry,
                 "pool": pool,
-                "config": Pubkey.from_string("J45dp2TMQXx5v5RDygsF3im7URJqu7QQ996V1kqXeNxN"),
+                "config": config_pda,
                 "oracle": conn.oracle_pubkey,
             }
         )
@@ -230,7 +230,7 @@ class OracleCPI:
         program_id = Pubkey.from_string(self.program_id)
         entry = Pubkey.from_string(entry_pda)
         pool = Pubkey.from_string(pool_pda)
-        config = Pubkey.from_string("J45dp2TMQXx5v5RDygsF3im7URJqu7QQ996V1kqXeNxN")
+        config_pda, _ = Pubkey.find_program_address([b"global_config_v1"], program_id)
         
         data = bytes([0x12, 0x00, 0x00, 0x00])
         data += views.to_bytes(8, "little")
@@ -244,7 +244,7 @@ class OracleCPI:
             accounts=[
                 AccountMeta(entry, True, True),
                 AccountMeta(pool, True, True),
-                AccountMeta(config, False, False),
+                AccountMeta(config_pda, False, False),
                 AccountMeta(self.connection.oracle_pubkey, False, True),
             ]
         )
@@ -290,12 +290,15 @@ class OracleCPI:
         
         config_pda, _ = conn._find_pda(b"global_config_v1")
         
+        global_config = await conn.get_global_config()
+        treasury = Pubkey.from_string(global_config.get("treasury", ""))
+        
         tx = program.transaction["slash_user"](
             accounts={
                 "config": config_pda,
                 "user_profile": user_profile,
                 "stake_account": stake_account,
-                "treasury": Pubkey.from_string(" treasury_address "),
+                "treasury": treasury,
                 "caller": conn.oracle_pubkey,
             }
         )
@@ -320,6 +323,8 @@ class OracleCPI:
         )
         
         config, _ = Pubkey.find_program_address([b"global_config_v1"], program_id)
+        global_config = await self.connection.get_global_config()
+        treasury = Pubkey.from_string(global_config.get("treasury", ""))
         
         data = bytes([0x10, 0x00, 0x00, 0x00])
         
@@ -330,7 +335,7 @@ class OracleCPI:
                 AccountMeta(config, False, False),
                 AccountMeta(user_profile, True, True),
                 AccountMeta(stake_account, True, True),
-                AccountMeta(Pubkey.from_string("treasury_address"), True, True),
+                AccountMeta(treasury, True, True),
                 AccountMeta(self.connection.oracle_pubkey, False, True),
             ]
         )
@@ -365,14 +370,18 @@ class OracleCPI:
         conn = self.connection
         pool = Pubkey.from_string(pool_pda)
         
+        pool_data = await conn.get_account_info(pool_pda)
+        creator = Pubkey.from_string(pool_data.get("creator", ""))
+        
         vault, _ = Pubkey.find_program_address(
             [b"vault", pool.to_bytes()],
             conn.program_id
         )
         
         config_pda, _ = conn._find_pda(b"global_config_v1")
-        creator = Pubkey.from_string("creator_address")
-        treasury = Pubkey.from_string("treasury_address")
+        
+        global_config = await conn.get_global_config()
+        treasury = Pubkey.from_string(global_config.get("treasury", ""))
         
         tx = program.transaction["close_and_payout"](
             accounts={
@@ -396,12 +405,17 @@ class OracleCPI:
         program_id = Pubkey.from_string(self.program_id)
         pool = Pubkey.from_string(pool_pda)
         
+        pool_data = await self.connection.get_account_info(pool_pda)
+        creator = Pubkey.from_string(pool_data.get("creator", ""))
+        
         vault, _ = Pubkey.find_program_address(
             [b"vault", pool.to_bytes()],
             program_id
         )
         
         config, _ = Pubkey.find_program_address([b"global_config_v1"], program_id)
+        global_config = await self.connection.get_global_config()
+        treasury = Pubkey.from_string(global_config.get("treasury", ""))
         
         data = bytes([0x05, 0x00, 0x00, 0x00])
         
@@ -411,10 +425,10 @@ class OracleCPI:
             accounts=[
                 AccountMeta(pool, True, True),
                 AccountMeta(vault, True, True),
-                AccountMeta(Pubkey.from_string("creator_address"), True, True),
+                AccountMeta(creator, True, True),
                 AccountMeta(self.connection.oracle_pubkey, True, True),
                 AccountMeta(config, False, False),
-                AccountMeta(Pubkey.from_string("treasury_address"), True, True),
+                AccountMeta(treasury, True, True),
                 AccountMeta(Pubkey.from_string("11111111111111111111111111111111"), False, False),
             ]
         )
@@ -461,13 +475,10 @@ def calculate_score(
 
 async def create_oracle_connection(
     rpc_url: str = "https://api.devnet.solana.com",
-    keypair_path: str = "keys/oracle.json",
+    keypair_path: str = None,
 ) -> SolanaConnection:
     """Create OracleConnection with validation."""
-    from ..config import config
-    
-    path = config.ORACLE_KEYPAIR_PATH if keypair_path == "keys/oracle.json" else keypair_path
-    return SolanaConnection(rpc_url, path)
+    return SolanaConnection(rpc_url, keypair_path)
 
 
 async def create_oracle_cpi(connection: SolanaConnection) -> OracleCPI:

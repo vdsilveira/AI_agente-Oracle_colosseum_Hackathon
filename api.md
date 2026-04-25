@@ -33,7 +33,7 @@ Curl
 curl -X 'POST' \
   'https://backend-views-solana.onrender.com/api/v1/analyze' \
   -H 'accept: application/json' \
-  -H 'X-API-Key: f0a84c40027bfa649d3a41c261c227bf24221a2161be704305a9156c56554fb3' \
+  -H 'X-API-Key: your_jwt_token_here' \
   -H 'Content-Type: application/json' \
   -d '{
   "job_id": "teste_novo_schema",

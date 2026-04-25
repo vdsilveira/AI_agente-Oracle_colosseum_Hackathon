@@ -21,7 +21,7 @@ class OracleAgent:
     def __init__(
         self,
         rpc_url: str = "https://api.devnet.solana.com",
-        oracle_keypair_path: str = "keys/oracle.json",
+        oracle_keypair_path: str = None,
     ):
         self.validator = OracleValidator()
         self.metrics_api = MetricsApiClient()
@@ -39,8 +39,7 @@ class OracleAgent:
     async def connection(self) -> SolanaConnection:
         """Lazy load SolanaConnection."""
         if self._connection is None:
-            path = config.ORACLE_KEYPAIR_PATH if self.oracle_keypair_path == "keys/oracle.json" else self.oracle_keypair_path
-            self._connection = SolanaConnection(self.rpc_url, path)
+            self._connection = SolanaConnection(self.rpc_url, self.oracle_keypair_path)
         return self._connection
 
     @property
