@@ -10,7 +10,7 @@ load_dotenv()
 class Config:
     """Oracle Agent configuration."""
 
-    JWT_TOKEN: str = os.getenv("JWT_TOKEN", "")
+    APP_API_KEY: str = os.getenv("APP_API_KEY", "")
     SOLANA_RPC_URL: str = os.getenv("SOLANA_RPC_URL", "https://api.devnet.solana.com")
     ORACLE_PUBLIC_KEY: str = os.getenv("ORACLE_PUBLIC_KEY", "")
     ORACLE_PRIVATE_KEY: str = os.getenv("ORACLE_PRIVATE_KEY", "")
@@ -34,8 +34,8 @@ class Config:
     @classmethod
     def validate(cls) -> bool:
         """Validate required configuration."""
-        if not cls.JWT_TOKEN:
-            raise ValueError("JWT_TOKEN is required in .env")
+        if not cls.APP_API_KEY:
+            raise ValueError("APP_API_KEY is required in .env")
         if not cls.SOLANA_RPC_URL:
             raise ValueError("SOLANA_RPC_URL is required in .env")
         if not cls.ORACLE_PUBLIC_KEY:

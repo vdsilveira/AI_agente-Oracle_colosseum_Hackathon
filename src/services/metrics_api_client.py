@@ -12,7 +12,7 @@ class MetricsApiClient:
     def __init__(self):
         self.base_url = config.METRICS_API_URL
         self.headers = {
-            "X-API-Key": config.JWT_TOKEN,
+            "X-API-Key": config.APP_API_KEY,
             "Content-Type": "application/json",
         }
 
