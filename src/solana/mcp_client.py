@@ -52,7 +52,10 @@ class SolanaMCPClient:
         
         Based on llms-full.txt: getAccountInfo RPC
         """
-        return await self._rpc_call("getAccountInfo", [pubkey, {"encoding": encoding}])
+        result = await self._rpc_call("getAccountInfo", [pubkey, {"encoding": encoding}])
+        if result and result.get("value"):
+            return result["value"]
+        return {}
     
     async def get_program_accounts(
         self,
@@ -84,7 +87,8 @@ class SolanaMCPClient:
     async def get_active_pools(self) -> list[dict]:
         """Busca pools com status = Open e não expiradas.
 
-        Returns list of VideoPool accounts com status==0 (Open) e expiryTimestamp > now
+        Uses RPC memcmp filter on VideoPool discriminator to fetch only pool accounts.
+        Returns list of VideoPool accounts com status==0 (Open) e expiryTimestamp > now.
         Decodes Borsh-serialized data from blockchain.
         """
         import base64
@@ -92,96 +96,61 @@ class SolanaMCPClient:
         import struct
         from loguru import logger
 
-        accounts = await self.get_program_accounts()
+        program_id = self.program_id
+        video_pool_disc = "PP5rDpEeLV6"
+        raw = await self._rpc_call("getProgramAccounts", [
+            program_id,
+            {
+                "encoding": "base64",
+                "filters": [{"memcmp": {"offset": 0, "bytes": video_pool_disc}}],
+            }
+        ])
+        accounts = raw if isinstance(raw, list) else []
         active_pools = []
         current_timestamp = int(time.time())
-
-        logger.debug(f"[get_active_pools] Total accounts from RPC: {len(accounts)}")
 
         for account in accounts:
             pool_pubkey = account.get("pubkey", "unknown")
             try:
-                # RPC returns account data in base64
                 data_b64 = account.get("account", {}).get("data", [None])[0]
                 if not data_b64:
                     continue
 
-                # Decode from base64
                 data = base64.b64decode(data_b64)
-                if len(data) < 100:
-                    logger.debug(f"[{pool_pubkey}] Data too short: {len(data)} bytes")
-                    continue
+                offset = 8  # skip discriminator
 
-                offset = 0
-
-                # Skip Anchor discriminator (8 bytes)
-                offset = 8
-
-                # creator: PublicKey (32 bytes)
                 creator_bytes = data[offset:offset+32]
                 creator = str(Pubkey(creator_bytes))
                 offset += 32
 
-                # original_video_id: String (4-byte length + variable data)
-                str_len_bytes = data[offset:offset+4]
-                str_len = struct.unpack('<I', str_len_bytes)[0]
-                video_id = ""
-                try:
-                    video_id = data[offset+4:offset+4+str_len].decode('utf-8')
-                except:
-                    video_id = "<decode_error>"
-                logger.debug(f"[{pool_pubkey}] video_id: {video_id} (len_bytes={list(str_len_bytes)}, len_value={str_len})")
-                old_offset = offset
-                offset += 4 + str_len
-                logger.debug(f"[{pool_pubkey}] after video_id: offset {old_offset} -> {offset}")
+                str_len = struct.unpack('<I', data[offset:offset+4])[0]
+                offset += 4
+                video_id = data[offset:offset+str_len].decode('utf-8', errors='replace')
+                offset += str_len
 
-                # prize_vault: PublicKey (32 bytes)
-                offset += 32
-
-                # prize_amount: u64 (8 bytes)
-                offset += 8
-
-                # scoring_rules: ScoringRules struct (3x u16 = 6 bytes, NOT 12!)
-                offset += 6
-
-                # status: PoolStatus enum (u8)
-                if offset >= len(data):
-                    logger.debug(f"[{pool_pubkey}] Not enough data for status (offset={offset}, len={len(data)})")
-                    continue
+                offset += 32  # prize_vault
+                offset += 8   # prize_amount
+                offset += 6   # scoring_rules (3x u16)
 
                 status = data[offset]
-                logger.debug(f"[{pool_pubkey}] status={status}")
-                offset += 1
+                offset += 5   # status + participant_count (u32)
 
-                # participant_count: u32 (4 bytes)
-                offset += 4
+                offset += 8   # total_score
 
-                # total_score: u64 (8 bytes)
-                offset += 8
+                expiry_timestamp = struct.unpack('<q', data[offset:offset+8])[0]
 
-                # expiry_timestamp: i64 (8 bytes, SIGNED!)
-                if offset + 8 > len(data):
-                    logger.debug(f"[{pool_pubkey}] Not enough data for expiry_timestamp (offset={offset}, data_len={len(data)})")
-                    continue
-
-                expiry_timestamp = struct.unpack('<q', data[offset:offset+8])[0]  # lowercase 'q' for signed
-                logger.debug(f"[{pool_pubkey}] expiry_timestamp={expiry_timestamp}, current={current_timestamp}")
-
-                # Filter: only include Open pools (status == 0) that haven't expired
                 if status == 0 and expiry_timestamp > current_timestamp:
-                    logger.info(f"[{pool_pubkey}] ACTIVE POOL FOUND! status=0, expiry={expiry_timestamp}, creator={creator}")
+                    logger.info(f"[{pool_pubkey}] ACTIVE POOL FOUND! status=0, expiry={expiry_timestamp}, creator={creator}, video_id={video_id}")
                     active_pools.append({
                         "pubkey": pool_pubkey,
-                        "pool_pda": pool_pubkey,  # Both formats for compatibility
+                        "pool_pda": pool_pubkey,
                         "creator": creator,
                         "status": status,
                         "expiryTimestamp": expiry_timestamp,
-                        "expiry_timestamp": expiry_timestamp,  # Both formats for compatibility
+                        "expiry_timestamp": expiry_timestamp,
+                        "original_video_id": video_id,
                     })
-                else:
-                    logger.debug(f"[{pool_pubkey}] Filtered out: status={status}, expired={expiry_timestamp <= current_timestamp}")
-            except Exception as e:
-                logger.debug(f"[{pool_pubkey}] Exception: {e}")
+            except Exception:
                 continue
 
         logger.info(f"[get_active_pools] Found {len(active_pools)} active pools")
@@ -190,101 +159,76 @@ class SolanaMCPClient:
     async def get_entries_for_pool(self, pool_pda: str) -> list[dict]:
         """Busca participant entries de uma pool específica.
 
-        Deserializes ParticipantEntry accounts and filters by pool_pda.
+        Uses RPC memcmp filters on ParticipantEntry discriminator + pool_pda.
+        Deserializes ParticipantEntry accounts.
         Returns list of entries with decoded fields: entry_pda, pool_pda, user, clip_link, score, claimed, etc.
         """
         import base64
         import struct
         from loguru import logger
 
-        accounts = await self.get_program_accounts()
+        program_id = self.program_id
+        entry_disc = "cZazjaACyjF"
+        raw = await self._rpc_call("getProgramAccounts", [
+            program_id,
+            {
+                "encoding": "base64",
+                "filters": [
+                    {"memcmp": {"offset": 0, "bytes": entry_disc}},
+                    {"memcmp": {"offset": 8, "bytes": pool_pda}},
+                ],
+            }
+        ])
+        accounts = raw if isinstance(raw, list) else []
         entries = []
 
         for account in accounts:
             entry_pubkey = account.get("pubkey", "unknown")
             try:
-                # RPC returns account data in base64
                 data_b64 = account.get("account", {}).get("data", [None])[0]
                 if not data_b64:
                     continue
 
                 data = base64.b64decode(data_b64)
-                if len(data) < 150:
-                    logger.debug(f"[get_entries_for_pool] Entry {entry_pubkey}: data too short {len(data)} bytes")
-                    continue
+                offset = 8  # skip discriminator
 
-                offset = 0
-
-                # Skip discriminator (8 bytes)
-                offset = 8
-
-                # pool_pda: PublicKey (32 bytes)
                 entry_pool = str(Pubkey(data[offset:offset+32]))
                 offset += 32
 
-                # Skip to score field (other fields before it)
-                # user: PublicKey (32 bytes)
-                user_bytes = data[offset:offset+32]
-                user = str(Pubkey(user_bytes))
+                user = str(Pubkey(data[offset:offset+32]))
                 offset += 32
 
-                # channel_id: String (4-byte length + UTF-8 data)
                 ch_str_len = struct.unpack('<I', data[offset:offset+4])[0]
                 offset += 4
-                channel_id = ""
-                if ch_str_len > 0 and ch_str_len < 1000:
-                    try:
-                        channel_id = data[offset:offset+ch_str_len].decode('utf-8')
-                    except:
-                        channel_id = "<decode_error>"
+                channel_id = data[offset:offset+ch_str_len].decode('utf-8', errors='replace') if ch_str_len > 0 else ""
                 offset += ch_str_len
 
-                # clip_link: String (4-byte length + UTF-8 data)
                 str_len = struct.unpack('<I', data[offset:offset+4])[0]
                 offset += 4
-                clip_link = ""
-                if str_len > 0 and str_len < 1000:
-                    try:
-                        clip_link = data[offset:offset+str_len].decode('utf-8')
-                    except:
-                        clip_link = "<decode_error>"
+                clip_link = data[offset:offset+str_len].decode('utf-8', errors='replace') if str_len > 0 else ""
                 offset += str_len
 
-                # Skip other fields to get to score
-                # views: u64 (8 bytes)
-                offset += 8
-                # likes: u64 (8 bytes)
-                offset += 8
-                # comments: u64 (8 bytes)
-                offset += 8
-
-                # score: u64 (8 bytes)
-                if offset + 8 > len(data):
-                    logger.debug(f"[get_entries_for_pool] Entry {entry_pubkey}: not enough data for score")
-                    continue
+                offset += 8  # views
+                offset += 8  # likes
+                offset += 8  # comments
 
                 score = struct.unpack('<Q', data[offset:offset+8])[0]
                 offset += 8
 
-                # claimed: bool (1 byte)
                 claimed = offset < len(data) and data[offset] == 1
-                offset += 1
 
-                # Only include entries from this pool
-                if entry_pool == pool_pda:
-                    entries.append({
-                        "entry_pda": entry_pubkey,
-                        "pubkey": entry_pubkey,
-                        "pool_pda": entry_pool,
-                        "user": user,
-                        "channel_id": channel_id,
-                        "clip_link": clip_link,
-                        "score": score,
-                        "claimed": claimed,
-                    })
+                entries.append({
+                    "entry_pda": entry_pubkey,
+                    "pubkey": entry_pubkey,
+                    "pool_pda": entry_pool,
+                    "user": user,
+                    "channel_id": channel_id,
+                    "clip_link": clip_link,
+                    "score": score,
+                    "claimed": claimed,
+                })
 
-            except Exception as e:
-                logger.debug(f"[get_entries_for_pool] Entry {entry_pubkey}: {e}")
+            except Exception:
                 continue
 
         logger.debug(f"[get_entries_for_pool] Found {len(entries)} entries for pool {pool_pda}")

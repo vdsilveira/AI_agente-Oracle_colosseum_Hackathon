@@ -4,9 +4,11 @@ pydantic>=2.0.0
 python-dotenv>=1.0.0
 
 # YouTube
-youtube-transcript-api>=0.6.0
-pytube>=15.0.0
 yt-dlp>=2023.12.0
+pytube>=15.0.0
+
+# Speech-to-Text
+faster-whisper>=1.0.0
 
 # Image Processing
 opencv-python>=4.8.0

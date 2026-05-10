@@ -33,6 +33,10 @@ class Config:
     PROGRAM_ID: str = os.getenv("PROGRAM_ID", "4RAbxbEVCsYaaK3WR8r7eYwrofTJ7yqdZ3hqSYRLPfT4")
 
     ALERT_WEBHOOK_URL: str = os.getenv("ALERT_WEBHOOK_URL", "")
+    YOUTUBE_COOKIES_PATH: str = os.getenv("YOUTUBE_COOKIES_PATH", "")
+
+    WHISPER_MODEL_SIZE: str = os.getenv("WHISPER_MODEL_SIZE", "tiny")
+    WHISPER_DEVICE: str = os.getenv("WHISPER_DEVICE", "cpu")
 
     @classmethod
     def validate(cls) -> bool:

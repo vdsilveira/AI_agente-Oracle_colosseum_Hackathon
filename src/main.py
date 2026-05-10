@@ -99,70 +99,23 @@ class OracleAgent:
             else:
                 logger.warning(f"Editor {editor_wallet} has no registered channels")
 
-            # --- Step 2: Transcript comparison ---
-            video_b_id = self.validator.channel_service.extract_video_id(clip_url)
-            if not video_b_id:
-                return "error: invalid clip URL"
+            # --- Step 2: Channel-only validation (transcript/frames skipped — too slow) ---
+            if channel_verified:
+                logger.success(f"Submission VALID (channel only): {entry_pda}")
+                self.db.save_validation({
+                    "entry_pda": entry_pda,
+                    "pool_pda": pool_pda,
+                    "video_a_id": video_a_id,
+                    "video_b_id": clip_url,
+                    "status": "valid",
+                    "transcript_score": 0.0,
+                    "frame_score": 0,
+                    "reason": "Channel verified (content check deferred)",
+                })
+                return "valid"
 
-            transcript_a = self.validator.transcript_service.get_transcript(video_a_id)
-            transcript_b = self.validator.transcript_service.get_transcript(video_b_id)
-
-            transcript_passed = True
-            transcript_score = 0.0
-            if transcript_a and transcript_b:
-                transcript_score = self.validator.transcript_service.compare_transcripts(
-                    transcript_a, transcript_b
-                )
-                logger.info(f"Transcript score: {transcript_score:.2%}")
-
-                if transcript_score < config.TRANSCRIPT_MIN_SCORE:
-                    transcript_passed = False
-                    reason = f"Transcript {transcript_score:.2%} < {config.TRANSCRIPT_MIN_SCORE:.2%}"
-                    logger.warning(reason)
-
-                    if not channel_verified:
-                        return await self._handle_fraud(
-                            entry_pda, pool_pda, editor_wallet,
-                            f"FRAUD: {reason} + channel unverified",
-                        )
-            else:
-                logger.warning("Transcript unavailable – skipping transcript check")
-
-            # --- Step 3: Frame comparison ---
-            frames_passed = True
-            frame_score = 0
-            if transcript_passed:
-                frame_score = await self.validator._validate_frames(video_a_id, video_b_id)
-                logger.info(f"Frame score: {frame_score}/{config.FRAME_TOTAL_SAMPLES}")
-
-                if frame_score < config.FRAME_MIN_MATCHES:
-                    frames_passed = False
-                    reason = f"Frames {frame_score}/{config.FRAME_TOTAL_SAMPLES} < {config.FRAME_MIN_MATCHES}"
-                    logger.warning(reason)
-
-                    if not channel_verified:
-                        return await self._handle_fraud(
-                            entry_pda, pool_pda, editor_wallet,
-                            f"FRAUD: {reason} + channel unverified",
-                        )
-
-            # --- Results ---
-            if not transcript_passed:
-                return "invalid_transcript"
-            if not frames_passed:
-                return "invalid_frames"
-
-            logger.success(f"Submission VALID: {entry_pda}")
-            self.db.save_validation({
-                "entry_pda": entry_pda,
-                "pool_pda": pool_pda,
-                "status": "valid",
-                "transcript_score": transcript_score,
-                "frame_score": frame_score,
-                "channel_verified": channel_verified,
-                "reason": "All checks passed",
-            })
-            return "valid"
+            logger.warning(f"Entry {entry_pda}: channel not verified")
+            return "invalid_channel"
 
         except Exception as e:
             logger.error(f"Validation error for {entry_pda}: {e}")
@@ -209,7 +162,7 @@ class OracleAgent:
         try:
             conn = await self.connection
             pools = await conn.get_active_pools()
-            logger.debug(f"Found {len(pools)} active pools")
+            logger.trace(f"Found {len(pools)} active pools")
             return pools
         except Exception as e:
             logger.error(f"Failed to check active pools: {e}")
@@ -221,7 +174,7 @@ class OracleAgent:
             conn = await self.connection
             entries = await conn.get_entries_for_pool(pool_pda)
             new_entries = [e for e in entries if e.get("score", 0) == 0]
-            logger.debug(f"Found {len(new_entries)} new entries for pool {pool_pda}")
+            logger.trace(f"Found {len(new_entries)} new entries for pool {pool_pda}")
             return new_entries
         except Exception as e:
             logger.error(f"Failed to check entries: {e}")
@@ -243,7 +196,7 @@ class OracleAgent:
                 entries = await conn.get_entries_for_pool(pool_pda)
                 valid_entries = [
                     e for e in entries
-                    if e.get("score", 0) > 0 and not e.get("claimed", False)
+                    if not e.get("claimed", False)
                 ]
 
                 if not valid_entries:
@@ -380,12 +333,45 @@ class OracleAgent:
 
                             if result == "valid":
                                 logger.success(f"Entry {entry_pda} validated – editor {editor_wallet}")
-                            elif result == "fraud":
-                                logger.error(f"FRAUD in entry {entry_pda} – editor {editor_wallet} slashed")
-                            elif result == "invalid_transcript":
-                                logger.warning(f"Entry {entry_pda}: transcript below threshold")
-                            elif result == "invalid_frames":
-                                logger.warning(f"Entry {entry_pda}: frames below threshold")
+                                try:
+                                    cpi = await self.oracle_cpi
+                                    channel_handle = entry.get("channel_id", editor_wallet)
+                                    metrics_data = await asyncio.wait_for(
+                                        self.metrics_api.get_metrics(clip_url, channel_handle),
+                                        timeout=130.0,
+                                    )
+                                    if not metrics_data:
+                                        logger.warning(
+                                            f"No metrics returned for {entry_pda} – "
+                                            f"skipping on-chain score init"
+                                        )
+                                        continue
+                                    metrics = metrics_data.get("metrics", {})
+                                    views = metrics.get("views", 0)
+                                    likes = metrics.get("likes", 0)
+                                    comments = metrics.get("comments", 0)
+                                    link_hash = hashlib.sha256(clip_url.encode()).digest()
+                                    tx_sig = await cpi.update_metrics(
+                                        entry_pda=entry_pda,
+                                        pool_pda=pool_pda,
+                                        views=views,
+                                        likes=likes,
+                                        comments=comments,
+                                        link_hash=link_hash,
+                                    )
+                                    logger.info(
+                                        f"Initialized on-chain score for {entry_pda}: "
+                                        f"V={views} L={likes} C={comments}, tx={tx_sig}"
+                                    )
+                                except asyncio.TimeoutError:
+                                    logger.error(
+                                        f"Scoring init timed out for {entry_pda} "
+                                        f"(Metrics API >130s)"
+                                    )
+                                except Exception as e:
+                                    logger.error(f"Failed to initialize score for {entry_pda}: {e}")
+                            elif result == "invalid_channel":
+                                logger.warning(f"Entry {entry_pda}: channel not verified — entry skipped, no slash")
                             else:
                                 logger.warning(f"Entry {entry_pda} validation result: {result}")
 

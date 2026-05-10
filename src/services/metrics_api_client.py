@@ -1,7 +1,8 @@
 """Metrics API client for batch video analysis."""
 
+import asyncio
 import uuid
-from typing import Any
+from typing import Any, Optional
 import httpx
 from ..config import config
 from ..utils.proxy_helper import get_httpx_proxy
@@ -17,23 +18,25 @@ class MetricsApiClient:
             "Content-Type": "application/json",
         }
         self._proxy = get_httpx_proxy()
+        self._max_retries = 2
+        self._base_timeout = 120.0
 
-    def _make_client(self, timeout: float = 60.0) -> httpx.AsyncClient:
+    def _make_client(self, timeout: Optional[float] = None) -> httpx.AsyncClient:
         """Create httpx client with optional proxy."""
-        kwargs = {"timeout": timeout}
+        kwargs = {"timeout": timeout or self._base_timeout}
         if self._proxy:
             kwargs["proxy"] = self._proxy
         return httpx.AsyncClient(**kwargs)
 
-    async def analyze_batch(self, tasks: list[dict]) -> dict[str, Any]:
+    async def analyze_batch(self, tasks: list[dict]) -> Optional[dict[str, Any]]:
         """
-        Analyze a batch of videos.
+        Analyze a batch of videos with retry and exponential backoff.
 
         Args:
             tasks: List of {"url": str, "platform": str, "user_handle": str}
 
         Returns:
-            API response with metrics for each video
+            API response with metrics for each video, or None if all retries failed
         """
         payload = {
             "job_id": f"oracle-{uuid.uuid4().hex[:8]}",
@@ -43,16 +46,44 @@ class MetricsApiClient:
 
         from loguru import logger
 
-        async with self._make_client(timeout=60.0) as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/analyze",
-                headers=self.headers,
-                json=payload,
-            )
-            if response.status_code != 200:
-                logger.error(f"[analyze_batch] {response.status_code} for pool tasks: {response.text[:500]}")
-            response.raise_for_status()
-            return response.json()
+        last_error = None
+        for attempt in range(1 + self._max_retries):
+            try:
+                async with self._make_client() as client:
+                    response = await client.post(
+                        f"{self.base_url}/api/v1/analyze",
+                        headers=self.headers,
+                        json=payload,
+                    )
+                    if response.status_code != 200:
+                        logger.warning(
+                            f"[analyze_batch] attempt {attempt+1}: {response.status_code} "
+                            f"{response.text[:300]}"
+                        )
+                        if attempt < self._max_retries:
+                            wait = 2 ** (attempt + 1)
+                            logger.info(f"Retrying in {wait}s...")
+                            await asyncio.sleep(wait)
+                            continue
+                        response.raise_for_status()
+                    return response.json()
+
+            except httpx.TimeoutException as e:
+                last_error = e
+                logger.warning(f"[analyze_batch] attempt {attempt+1} timed out")
+                if attempt < self._max_retries:
+                    wait = 2 ** (attempt + 1)
+                    logger.info(f"Retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+            except Exception as e:
+                last_error = e
+                logger.error(f"[analyze_batch] attempt {attempt+1} failed: {e}")
+                if attempt < self._max_retries:
+                    wait = 2 ** (attempt + 1)
+                    await asyncio.sleep(wait)
+
+        logger.error(f"[analyze_batch] all {self._max_retries + 1} attempts failed: {last_error}")
+        return None
 
     async def get_metrics(self, video_url: str, user_handle: str) -> dict[str, Any]:
         """
@@ -60,11 +91,24 @@ class MetricsApiClient:
 
         Returns:
             {"video_id": str, "metrics": {"views": int, "likes": int, "comments": int}}
+            or empty dict on failure.
         """
+        from loguru import logger
+
         result = await self.analyze_batch([
-            {"url": video_url, "platform": "youtube", "user_handle": user_handle}
+            {
+                "platform": "youtube",
+                "user_handle": user_handle,
+                "videos": [{"url": video_url, "platform": "youtube"}],
+            }
         ])
-        return result["summary"][0]["videos"][0]
+        if not result:
+            return {}
+        try:
+            return result["summary"][0]["videos"][0]
+        except (KeyError, IndexError, TypeError) as e:
+            logger.warning(f"[get_metrics] unexpected response format: {e}")
+            return {}
 
     async def validate_clip_ownership(self, clip_url: str, editor_channels: list[str]) -> str:
         """

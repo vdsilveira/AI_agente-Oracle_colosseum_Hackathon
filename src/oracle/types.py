@@ -10,6 +10,7 @@ class ValidationStatus(str, Enum):
 
     VALID = "valid"
     WRONG_CHANNEL = "wrong_channel"
+    INVALID_CHANNEL = "invalid_channel"
     INVALID_TRANSCRIPT = "invalid_transcript"
     INVALID_FRAMES = "invalid_frames"
     FRAUD = "fraud"

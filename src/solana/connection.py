@@ -8,6 +8,7 @@ from solders.pubkey import Pubkey
 from solders.keypair import Keypair
 from solders.instruction import Instruction, AccountMeta
 from solders.transaction import Transaction
+from solders.message import Message
 from solana.rpc.api import Client
 
 from .mcp_client import SolanaMCPClient
@@ -41,12 +42,12 @@ class SolanaConnection:
     @property
     def public_key(self):
         """Get oracle public key."""
-        return self.keypair.public_key
+        return self.keypair.pubkey()
 
     @property
     def oracle_pubkey(self) -> Pubkey:
         """Get oracle public key as Pubkey."""
-        return Pubkey.from_bytes(self.keypair.public_key.to_bytes())
+        return self.keypair.pubkey()
 
     def _find_pda(self, *seeds) -> tuple[Pubkey, int]:
         """Find PDA with bump seed."""
@@ -233,7 +234,8 @@ class OracleCPI:
         pool = Pubkey.from_string(pool_pda)
         config_pda, _ = Pubkey.find_program_address([b"global_config_v1"], program_id)
         
-        data = bytes([0x12, 0x00, 0x00, 0x00])
+        # Anchor 8-byte discriminator: sha256("global:update_metrics")[:8]
+        data = bytes([79, 114, 128, 135, 148, 137, 172, 185])
         data += views.to_bytes(8, "little")
         data += likes.to_bytes(8, "little")
         data += comments.to_bytes(8, "little")
@@ -243,20 +245,23 @@ class OracleCPI:
             program_id=program_id,
             data=data,
             accounts=[
-                AccountMeta(entry, True, True),
-                AccountMeta(pool, True, True),
+                AccountMeta(entry, False, True),
+                AccountMeta(pool, False, True),
                 AccountMeta(config_pda, False, False),
-                AccountMeta(self.connection.oracle_pubkey, False, True),
+                AccountMeta(self.connection.oracle_pubkey, True, False),
             ]
         )
         
-        tx = Transaction().add(instruction)
-        tx.sign(self.connection.keypair)
-        
         try:
-            result = await self.connection.client.send_transaction(
-                tx, self.connection.keypair
+            blockhash = self.connection.client.get_latest_blockhash().value.blockhash
+            msg = Message.new_with_blockhash(
+                instructions=[instruction],
+                payer=self.connection.oracle_pubkey,
+                blockhash=blockhash,
             )
+            tx = Transaction.new_unsigned(msg)
+            tx.sign([self.connection.keypair], blockhash)
+            result = await self.connection.client.send_transaction(tx)
             return str(result.value)
         except Exception as e:
             return f"tx-error: {e}"
@@ -327,27 +332,31 @@ class OracleCPI:
         global_config = await self.connection.get_global_config()
         treasury = Pubkey.from_string(global_config.get("treasury", ""))
         
-        data = bytes([0x10, 0x00, 0x00, 0x00])
+        # Anchor 8-byte discriminator: sha256("global:slash_user")[:8]
+        data = bytes([208, 190, 26, 101, 212, 59, 107, 8])
         
         instruction = Instruction(
             program_id=program_id,
             data=data,
             accounts=[
                 AccountMeta(config, False, False),
-                AccountMeta(user_profile, True, True),
-                AccountMeta(stake_account, True, True),
-                AccountMeta(treasury, True, True),
-                AccountMeta(self.connection.oracle_pubkey, False, True),
+                AccountMeta(user_profile, False, True),
+                AccountMeta(stake_account, False, True),
+                AccountMeta(treasury, False, True),
+                AccountMeta(self.connection.oracle_pubkey, True, False),
             ]
         )
         
-        tx = Transaction().add(instruction)
-        tx.sign(self.connection.keypair)
-        
         try:
-            result = await self.connection.client.send_transaction(
-                tx, self.connection.keypair
+            blockhash = self.connection.client.get_latest_blockhash().value.blockhash
+            msg = Message.new_with_blockhash(
+                instructions=[instruction],
+                payer=self.connection.oracle_pubkey,
+                blockhash=blockhash,
             )
+            tx = Transaction.new_unsigned(msg)
+            tx.sign([self.connection.keypair], blockhash)
+            result = await self.connection.client.send_transaction(tx)
             return str(result.value)
         except Exception as e:
             return f"tx-error: {e}"
@@ -418,29 +427,33 @@ class OracleCPI:
         global_config = await self.connection.get_global_config()
         treasury = Pubkey.from_string(global_config.get("treasury", ""))
         
-        data = bytes([0x05, 0x00, 0x00, 0x00])
+        # Anchor 8-byte discriminator: sha256("global:close_and_payout")[:8]
+        data = bytes([146, 191, 147, 126, 83, 78, 191, 118])
         
         instruction = Instruction(
             program_id=program_id,
             data=data,
             accounts=[
-                AccountMeta(pool, True, True),
-                AccountMeta(vault, True, True),
-                AccountMeta(creator, True, True),
+                AccountMeta(pool, False, True),
+                AccountMeta(vault, False, True),
+                AccountMeta(creator, False, True),
                 AccountMeta(self.connection.oracle_pubkey, True, True),
                 AccountMeta(config, False, False),
-                AccountMeta(treasury, True, True),
+                AccountMeta(treasury, False, True),
                 AccountMeta(Pubkey.from_string("11111111111111111111111111111111"), False, False),
             ]
         )
         
-        tx = Transaction().add(instruction)
-        tx.sign(self.connection.keypair)
-        
         try:
-            result = await self.connection.client.send_transaction(
-                tx, self.connection.keypair
+            blockhash = self.connection.client.get_latest_blockhash().value.blockhash
+            msg = Message.new_with_blockhash(
+                instructions=[instruction],
+                payer=self.connection.oracle_pubkey,
+                blockhash=blockhash,
             )
+            tx = Transaction.new_unsigned(msg)
+            tx.sign([self.connection.keypair], blockhash)
+            result = await self.connection.client.send_transaction(tx)
             return str(result.value)
         except Exception as e:
             return f"tx-error: {e}"
