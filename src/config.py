@@ -32,6 +32,8 @@ class Config:
 
     PROGRAM_ID: str = os.getenv("PROGRAM_ID", "4RAbxbEVCsYaaK3WR8r7eYwrofTJ7yqdZ3hqSYRLPfT4")
 
+    CORE_API_URL: str = os.getenv("CORE_API_URL", "http://localhost:8001/api/v1")
+
     ALERT_WEBHOOK_URL: str = os.getenv("ALERT_WEBHOOK_URL", "")
     YOUTUBE_COOKIES_PATH: str = os.getenv("YOUTUBE_COOKIES_PATH", "")
 

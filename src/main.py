@@ -3,8 +3,11 @@
 import asyncio
 import hashlib
 import signal
+from datetime import datetime, timezone
 from loguru import logger
 from typing import Optional
+
+import httpx
 
 from .config import config
 from .oracle.validator import OracleValidator
@@ -168,6 +171,76 @@ class OracleAgent:
             logger.error(f"Failed to check active pools: {e}")
             return []
 
+    async def _sync_entry_to_core(self, entry: dict, pool_pda: str, views: int, likes: int, comments: int, score: int):
+        """Sync entry metrics to core-api DB."""
+        if not config.CORE_API_URL:
+            return
+        try:
+            payload = {
+                "pda_address": entry.get("entry_pda") or str(entry.get("pubkey", "")),
+                "pool_pda": pool_pda,
+                "user_wallet": entry.get("user", ""),
+                "channel_id": entry.get("channel_id", ""),
+                "clip_link": entry.get("clip_link", ""),
+                "views": views,
+                "likes": likes,
+                "comments": comments,
+                "score": score,
+                "claimed": entry.get("claimed", False),
+            }
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(
+                    f"{config.CORE_API_URL}/entries/sync",
+                    json=payload,
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"core-api entry sync returned {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Failed to sync entry to core-api: {e}")
+
+    async def _sync_pool_to_core(self, pool_pda: str, pool: dict):
+        """Sync pool data to core-api DB."""
+        if not config.CORE_API_URL:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(
+                    f"{config.CORE_API_URL}/pools/sync",
+                    json={
+                        "pda_address": pool_pda,
+                        "creator_wallet": pool.get("creator", ""),
+                        "original_video_id": pool.get("original_video_id", ""),
+                        "prize_amount": pool.get("prize_amount", 0),
+                        "scoring_rules": pool.get("scoring_rules", {
+                            "views_weight": 5000,
+                            "likes_weight": 3000,
+                            "comments_weight": 2000,
+                        }),
+                        "participant_count": pool.get("participant_count", 0),
+                        "total_score": pool.get("total_score", 0),
+                        "status": "OPEN",
+                        "expiry_timestamp": datetime.fromtimestamp(
+                            pool.get("expiry_timestamp", 0), tz=timezone.utc
+                        ).isoformat(),
+                    },
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"core-api pool sync returned {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Failed to sync pool to core-api: {e}")
+
+    async def _close_pool_in_core(self, pool_pda: str):
+        """Notify core-api that a pool has been closed/distributed."""
+        if not config.CORE_API_URL:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(f"{config.CORE_API_URL}/pools/{pool_pda}/close")
+                if resp.status_code != 200:
+                    logger.warning(f"core-api pool close returned {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Failed to close pool in core-api: {e}")
+
     async def check_new_entries(self, pool_pda: str) -> list[dict]:
         """Check for new entries in a pool (score == 0)."""
         try:
@@ -278,6 +351,8 @@ class OracleAgent:
                             score=score,
                         )
 
+                        await self._sync_entry_to_core(entry, pool_pda, views, likes, comments, score)
+
                     except Exception as e:
                         logger.error(f"Failed to update metrics for {entry_pda[:8]}...: {e}")
                         continue
@@ -301,6 +376,7 @@ class OracleAgent:
                     try:
                         tx_sig = await cpi.close_and_payout(pool_pda)
                         logger.info(f"Closed pool {pool_pda}, tx: {tx_sig}")
+                        await self._close_pool_in_core(pool_pda)
                     except Exception as e:
                         logger.error(f"Failed to close pool: {e}")
 
@@ -373,6 +449,8 @@ class OracleAgent:
                                         f"Initialized on-chain score for {entry_pda}: "
                                         f"V={views} L={likes} C={comments}, tx={tx_sig}"
                                     )
+                                    await self._sync_entry_to_core(entry, pool_pda, views, likes, comments, score)
+                                    await self._sync_pool_to_core(pool_pda, pool)
                                 except asyncio.TimeoutError:
                                     logger.error(
                                         f"Scoring init timed out for {entry_pda} "
