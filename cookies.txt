@@ -1,0 +1,9 @@
+# ============================================================
+# INSTRUÇÕES: Exportar cookies do YouTube
+# ============================================================
+# 1. Acesse youtube.com no seu navegador e faça login
+# 2. Instale uma extensão "Get cookies.txt" (Chrome/Firefox)
+# 3. Na página do YouTube, clique na extensão e exporte cookies
+# 4. Salve o arquivo como cookies.txt (substitua este)
+# 5. Formato: Netscape HTTP Cookie File
+# ============================================================
