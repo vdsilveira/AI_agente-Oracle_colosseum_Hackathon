@@ -81,13 +81,15 @@ class SolanaConnection:
 
     async def get_user_profile_pda(self, authority: str) -> tuple[str, int]:
         """Get UserProfile PDA."""
-        authority_bytes = Pubkey.from_string(authority).to_bytes()
-        return self._find_pda(b"user_profile", authority_bytes)
+        authority_bytes = bytes(Pubkey.from_string(authority))
+        pda, bump = self._find_pda(b"user_profile", authority_bytes)
+        return pda, bump
 
     async def get_stake_account_pda(self, authority: str) -> tuple[str, int]:
         """Get StakeAccount PDA."""
-        authority_bytes = Pubkey.from_string(authority).to_bytes()
-        return self._find_pda(b"stake", authority_bytes)
+        authority_bytes = bytes(Pubkey.from_string(authority))
+        pda, bump = self._find_pda(b"stake", authority_bytes)
+        return pda, bump
 
     async def get_creator_channels(self, creator_authority: str) -> list[str]:
         """Busca channel_ids do UserProfile do criador on-chain.
@@ -98,23 +100,22 @@ class SolanaConnection:
         from ..config import config
         try:
             profile = await self.get_user_profile(creator_authority)
-            return profile.get("channel_ids", [])
+            return profile.get("channelIds", [])
         except Exception as e:
             from loguru import logger
             logger.warning(f"Failed to get creator channels for {creator_authority}: {e}")
             return []
 
     async def get_user_profile(self, authority: str) -> dict:
-        """Busca UserProfile de um usuário.
+        """Busca UserProfile de um usuário (decodificado via Borsh).
         
         Args:
             authority: wallet address do usuário
         
         Returns:
-            dict com campos: authority, channel_ids, is_banned, bump
+            dict com campos: authority, channelIds, is_banned, bump
         """
-        pda, _ = await self.get_user_profile_pda(authority)
-        return await self.mcp_client.get_account_info(pda)
+        return await self.mcp_client.get_user_profile(authority)
 
     async def get_treasury(self) -> str:
         """Busca treasury address do GlobalConfig."""

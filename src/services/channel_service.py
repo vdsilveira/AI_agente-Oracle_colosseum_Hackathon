@@ -3,10 +3,17 @@
 from typing import Optional
 from pytube import YouTube
 from pytube.exceptions import VideoUnavailable
+from ..utils.proxy_helper import is_proxy_configured
 
 
 class ChannelService:
     """Verify YouTube video channel ownership."""
+
+    def __init__(self):
+        if is_proxy_configured():
+            from ..config import config
+            from loguru import logger
+            logger.info(f"[ChannelService] Proxy configured (HTTPS_PROXY={'set' if config.HTTPS_PROXY else 'not set'})")
 
     @staticmethod
     def extract_video_id(url: str) -> str:

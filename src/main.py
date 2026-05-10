@@ -13,6 +13,7 @@ from .services.metrics_api_client import MetricsApiClient
 from .services.alert_service import AlertService
 from .db.database import Database
 from .solana.connection import SolanaConnection, OracleCPI, create_oracle_connection
+from .utils.proxy_helper import is_proxy_configured
 
 
 class OracleAgent:
@@ -28,7 +29,7 @@ class OracleAgent:
         self.alert_service = AlertService()
         self.db = Database(config.DATABASE_URL.replace("sqlite:///", ""))
         self.running = False
-        
+
         self.rpc_url = rpc_url
         self.oracle_keypair_path = oracle_keypair_path
         self._connection: Optional[SolanaConnection] = None
@@ -53,57 +54,136 @@ class OracleAgent:
     async def validate_submission(
         self,
         video_a_id: str,
-        video_b_url: str,
-        creator_channels: list[str],
+        clip_url: str,
         entry_pda: str,
         pool_pda: str,
-        editor_wallet: str = "",
-        creator_wallet: str = "",
-    ):
-        """Validate a new submission."""
-        logger.info(f"Validating submission for {entry_pda}")
+        editor_wallet: str,
+    ) -> str:
+        """Full validation pipeline for new submissions.
 
-        result = await self.validator.validate(
-            video_a_id=video_a_id,
-            video_b_url=video_b_url,
-            creator_channels=creator_channels,
+        Pipeline:
+          1. Editor channel ownership check (via Metrics API)
+          2. Transcript similarity  (≥70%)
+          3. Frame similarity       (≥3/5 SSIM ≥0.70)
+
+        Slash (fraud) only when BOTH channel AND content checks fail.
+        Content-only failures are logged but the entry is simply skipped.
+
+        Returns:
+            "valid"               all checks passed
+            "fraud"               channel unverified + content failed (slash applied)
+            "invalid_transcript"  transcript below threshold
+            "invalid_frames"      frame match below threshold
+            "error: ..."          unexpected error
+        """
+        logger.info(f"Validating submission for entry {entry_pda}")
+
+        try:
+            conn = await self.connection
+
+            # --- Step 1: Editor channel ownership check (via API) ---
+            editor_profile = await conn.get_user_profile(editor_wallet)
+            registered_channels = editor_profile.get("channelIds", []) if editor_profile else []
+
+            channel_verified = False
+            if registered_channels:
+                extracted = await self.metrics_api.validate_clip_ownership(
+                    clip_url=clip_url,
+                    editor_channels=registered_channels,
+                )
+                channel_verified = bool(extracted)
+                if channel_verified:
+                    logger.success(f"Channel verified for editor {editor_wallet}: {extracted}")
+                else:
+                    logger.warning(f"Could not verify clip channel via API for {editor_wallet}")
+            else:
+                logger.warning(f"Editor {editor_wallet} has no registered channels")
+
+            # --- Step 2: Transcript comparison ---
+            video_b_id = self.validator.channel_service.extract_video_id(clip_url)
+            if not video_b_id:
+                return "error: invalid clip URL"
+
+            transcript_a = self.validator.transcript_service.get_transcript(video_a_id)
+            transcript_b = self.validator.transcript_service.get_transcript(video_b_id)
+
+            transcript_passed = True
+            transcript_score = 0.0
+            if transcript_a and transcript_b:
+                transcript_score = self.validator.transcript_service.compare_transcripts(
+                    transcript_a, transcript_b
+                )
+                logger.info(f"Transcript score: {transcript_score:.2%}")
+
+                if transcript_score < config.TRANSCRIPT_MIN_SCORE:
+                    transcript_passed = False
+                    reason = f"Transcript {transcript_score:.2%} < {config.TRANSCRIPT_MIN_SCORE:.2%}"
+                    logger.warning(reason)
+
+                    if not channel_verified:
+                        return await self._handle_fraud(
+                            entry_pda, pool_pda, editor_wallet,
+                            f"FRAUD: {reason} + channel unverified",
+                        )
+            else:
+                logger.warning("Transcript unavailable – skipping transcript check")
+
+            # --- Step 3: Frame comparison ---
+            frames_passed = True
+            frame_score = 0
+            if transcript_passed:
+                frame_score = await self.validator._validate_frames(video_a_id, video_b_id)
+                logger.info(f"Frame score: {frame_score}/{config.FRAME_TOTAL_SAMPLES}")
+
+                if frame_score < config.FRAME_MIN_MATCHES:
+                    frames_passed = False
+                    reason = f"Frames {frame_score}/{config.FRAME_TOTAL_SAMPLES} < {config.FRAME_MIN_MATCHES}"
+                    logger.warning(reason)
+
+                    if not channel_verified:
+                        return await self._handle_fraud(
+                            entry_pda, pool_pda, editor_wallet,
+                            f"FRAUD: {reason} + channel unverified",
+                        )
+
+            # --- Results ---
+            if not transcript_passed:
+                return "invalid_transcript"
+            if not frames_passed:
+                return "invalid_frames"
+
+            logger.success(f"Submission VALID: {entry_pda}")
+            self.db.save_validation({
+                "entry_pda": entry_pda,
+                "pool_pda": pool_pda,
+                "status": "valid",
+                "transcript_score": transcript_score,
+                "frame_score": frame_score,
+                "channel_verified": channel_verified,
+                "reason": "All checks passed",
+            })
+            return "valid"
+
+        except Exception as e:
+            logger.error(f"Validation error for {entry_pda}: {e}")
+            return f"error: {str(e)}"
+
+    async def _handle_fraud(
+        self,
+        entry_pda: str,
+        pool_pda: str,
+        editor_wallet: str,
+        reason: str,
+    ) -> str:
+        """Log fraud, fire alert, slash the user, return 'fraud'."""
+        logger.error(reason)
+        await self.alert_service.notify_fraud(
+            entry_pda=entry_pda,
+            user_wallet=editor_wallet,
+            reason=reason,
         )
-
-        self.db.save_validation({
-            "entry_pda": entry_pda,
-            "pool_pda": pool_pda,
-            "video_a_id": video_a_id,
-            "video_b_id": result.video_b_id or "",
-            "status": result.status.value,
-            "transcript_score": result.score,
-            "frame_score": result.frame_score,
-            "reason": result.reason,
-        })
-
-        if result.status == ValidationStatus.FRAUD:
-            logger.warning(f"FRAUD DETECTED: {result.reason}")
-            await self.alert_service.notify_fraud(
-                entry_pda=entry_pda,
-                user_wallet=editor_wallet,
-                reason=result.reason or "Unknown channel",
-            )
-            await self._slash_fraudulent_user(entry_pda, pool_pda)
-            return "fraud"
-        elif result.status == ValidationStatus.WRONG_CHANNEL:
-            logger.warning(f"WRONG_CHANNEL: {result.reason}")
-            await self.alert_service.notify_wrong_channel(
-                entry_pda=entry_pda,
-                creator_wallet=creator_wallet,
-                editor_wallet=editor_wallet,
-                clip_channel_id=result.channel_id or "",
-                reason=result.reason or "Wrong channel from creator",
-            )
-            return "wrong_channel"
-        elif result.status != ValidationStatus.VALID:
-            logger.warning(f"Validation failed: {result.reason}")
-            return "invalid"
-
-        return "valid"
+        await self._slash_fraudulent_user(entry_pda, pool_pda)
+        return "fraud"
 
     async def _slash_fraudulent_user(self, entry_pda: str, pool_pda: str):
         """Slash a fraudulent user."""
@@ -136,7 +216,7 @@ class OracleAgent:
             return []
 
     async def check_new_entries(self, pool_pda: str) -> list[dict]:
-        """Check for new entries in a pool."""
+        """Check for new entries in a pool (score == 0)."""
         try:
             conn = await self.connection
             entries = await conn.get_entries_for_pool(pool_pda)
@@ -173,9 +253,14 @@ class OracleAgent:
 
                 tasks = [
                     {
-                        "url": entry.get("clip_link", ""),
                         "platform": "youtube",
-                        "user_handle": entry.get("user", "")
+                        "user_handle": entry.get("channel_id", entry.get("user", "")),
+                        "videos": [
+                            {
+                                "url": entry.get("clip_link", ""),
+                                "platform": "youtube",
+                            }
+                        ],
                     }
                     for entry in valid_entries
                 ]
@@ -267,56 +352,47 @@ class OracleAgent:
 
                 if pools:
                     conn = await self.connection
-                    
+
                     for pool in pools:
                         pool_pda = pool.get("pool_pda") or str(pool.get("pubkey", ""))
                         if not pool_pda:
                             continue
-                        
-                        creator = pool.get("creator", "")
-                        
-                        creator_channels = []
-                        if creator:
-                            try:
-                                creator_channels = await conn.get_creator_channels(creator)
-                            except Exception as e:
-                                logger.warning(f"Failed to get creator channels for {creator}: {e}")
-                                continue
-                        
-                        if not creator_channels:
-                            logger.warning(f"No channels registered for creator {creator}, skipping validation")
-                            continue
-                        
+
+                        video_a_id = pool.get("original_video_id", "")
+
+                        # Process new entries that need first-time validation
                         new_entries = await self.check_new_entries(pool_pda)
-                        
+
                         for entry in new_entries:
-                            video_a_id = pool.get("original_video_id", "")
-                            video_b_url = entry.get("clip_link", "")
+                            clip_url = entry.get("clip_link", "")
                             entry_pda = entry.get("entry_pda") or str(entry.get("pubkey", ""))
                             editor_wallet = entry.get("user", "")
-                            
-                            logger.info(f"Validating new entry: {entry_pda}")
-                            
+
+                            logger.info(f"Validating new entry {entry_pda} from editor {editor_wallet}")
+
                             result = await self.validate_submission(
                                 video_a_id=video_a_id,
-                                video_b_url=video_b_url,
-                                creator_channels=creator_channels,
+                                clip_url=clip_url,
                                 entry_pda=entry_pda,
                                 pool_pda=pool_pda,
                                 editor_wallet=editor_wallet,
-                                creator_wallet=creator,
                             )
-                            
+
                             if result == "valid":
-                                logger.success(f"Entry {entry_pda} validated successfully")
-                            elif result == "wrong_channel":
-                                logger.warning(f"Entry {entry_pda} wrong channel, skipped")
+                                logger.success(f"Entry {entry_pda} validated – editor {editor_wallet}")
                             elif result == "fraud":
-                                logger.error(f"Entry {entry_pda} fraud detected, user slashed")
-                            elif result == "invalid":
-                                logger.warning(f"Entry {entry_pda} invalid: {result}")
-                    
+                                logger.error(f"FRAUD in entry {entry_pda} – editor {editor_wallet} slashed")
+                            elif result == "invalid_transcript":
+                                logger.warning(f"Entry {entry_pda}: transcript below threshold")
+                            elif result == "invalid_frames":
+                                logger.warning(f"Entry {entry_pda}: frames below threshold")
+                            else:
+                                logger.warning(f"Entry {entry_pda} validation result: {result}")
+
+                    # Update metrics for all pools (entries with score > 0)
                     await self.update_all_metrics(pools)
+
+                    # Close expired pools
                     await self.check_expired_pools(pools)
 
                 await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
@@ -333,7 +409,7 @@ class OracleAgent:
     async def run_once(self):
         """Run a single iteration (for testing)."""
         logger.info("Running single iteration...")
-        
+
         pools = await self.check_active_pools()
         logger.info(f"Active pools: {len(pools)}")
 
@@ -352,7 +428,7 @@ class OracleAgent:
     @staticmethod
     def _calculate_score(metrics: dict, scoring_rules: dict = None) -> int:
         """Calculate weighted score.
-        
+
         scoring_rules:
         - views_weight: u16 (ex: 5000 = 50%)
         - likes_weight: u16 (ex: 3000 = 30%)
@@ -381,6 +457,11 @@ class OracleAgent:
 async def main():
     """Main entry point."""
     logger.info("Starting Oracle Agent...")
+
+    if is_proxy_configured():
+        logger.info(f"HTTP proxy configured: HTTPS_PROXY={'set' if config.HTTPS_PROXY else 'not set'}")
+    else:
+        logger.warning("No HTTP proxy configured - YouTube requests may be blocked")
 
     try:
         config.validate()

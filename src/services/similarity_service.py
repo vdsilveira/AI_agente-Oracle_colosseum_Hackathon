@@ -8,13 +8,19 @@ import numpy as np
 import yt_dlp
 from skimage.metrics import structural_similarity as ssim
 
+from ..utils.proxy_helper import get_ytdlp_proxy, is_proxy_configured
+
 
 class SimilarityService:
     """Compare video frames using SSIM."""
 
     def __init__(self):
         self.temp_dir = tempfile.mkdtemp()
-        self.ydl = yt_dlp.YoutubeDL({'quiet': True})
+        ydl_opts = {'quiet': True}
+        proxy = get_ytdlp_proxy()
+        if proxy:
+            ydl_opts['proxy'] = proxy
+        self.ydl = yt_dlp.YoutubeDL(ydl_opts)
 
     def _get_stream_url(self, video_id: str) -> Optional[str]:
         """Get direct stream URL using yt-dlp."""

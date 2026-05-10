@@ -23,7 +23,10 @@ class Config:
     FRAME_MIN_MATCHES: int = int(os.getenv("FRAME_MIN_MATCHES", "3"))
     FRAME_TOTAL_SAMPLES: int = int(os.getenv("FRAME_TOTAL_SAMPLES", "5"))
 
-    POLL_INTERVAL_SECONDS: int = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))
+    POLL_INTERVAL_SECONDS: int = int(os.getenv("POLL_INTERVAL_SECONDS", "60"))
+
+    HTTP_PROXY: str = os.getenv("HTTP_PROXY", "")
+    HTTPS_PROXY: str = os.getenv("HTTPS_PROXY", "")
 
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///oracle.db")
 

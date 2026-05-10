@@ -3,6 +3,7 @@
 import re
 from typing import Optional
 from youtube_transcript_api import YouTubeTranscriptApi
+from ..utils.proxy_helper import is_proxy_configured
 
 
 class TranscriptService:
@@ -10,6 +11,10 @@ class TranscriptService:
 
     def __init__(self):
         self._api = YouTubeTranscriptApi()
+        if is_proxy_configured():
+            from ..config import config
+            from loguru import logger
+            logger.info(f"[TranscriptService] Proxy configured (HTTPS_PROXY={'set' if config.HTTPS_PROXY else 'not set'})")
 
     @staticmethod
     def extract_video_id(url: str) -> str:
