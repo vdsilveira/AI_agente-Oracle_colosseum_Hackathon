@@ -210,7 +210,7 @@ class OracleCPI:
             }
         )
         
-        tx_sig = await conn.client.send_transaction(tx, conn.keypair)
+        tx_sig = conn.client.send_transaction(tx, conn.keypair)
         return str(tx_sig.value)
 
     async def _update_metrics_rpc(
@@ -261,7 +261,7 @@ class OracleCPI:
             )
             tx = Transaction.new_unsigned(msg)
             tx.sign([self.connection.keypair], blockhash)
-            result = await self.connection.client.send_transaction(tx)
+            result = self.connection.client.send_transaction(tx)
             return str(result.value)
         except Exception as e:
             return f"tx-error: {e}"
@@ -309,7 +309,7 @@ class OracleCPI:
             }
         )
         
-        tx_sig = await conn.client.send_transaction(tx, conn.keypair)
+        tx_sig = conn.client.send_transaction(tx, conn.keypair)
         return str(tx_sig.value)
 
     async def _slash_user_rpc(self, user_authority: str) -> str:
@@ -356,7 +356,7 @@ class OracleCPI:
             )
             tx = Transaction.new_unsigned(msg)
             tx.sign([self.connection.keypair], blockhash)
-            result = await self.connection.client.send_transaction(tx)
+            result = self.connection.client.send_transaction(tx)
             return str(result.value)
         except Exception as e:
             return f"tx-error: {e}"
@@ -405,7 +405,7 @@ class OracleCPI:
             }
         )
         
-        tx_sig = await conn.client.send_transaction(tx, conn.keypair)
+        tx_sig = conn.client.send_transaction(tx, conn.keypair)
         return str(tx_sig.value)
 
     async def _close_and_payout_rpc(self, pool_pda: str) -> str:
@@ -453,7 +453,7 @@ class OracleCPI:
             )
             tx = Transaction.new_unsigned(msg)
             tx.sign([self.connection.keypair], blockhash)
-            result = await self.connection.client.send_transaction(tx)
+            result = self.connection.client.send_transaction(tx)
             return str(result.value)
         except Exception as e:
             return f"tx-error: {e}"

@@ -181,11 +181,12 @@ class OracleAgent:
             return []
 
     async def update_all_metrics(self, pools: list[dict]):
-        """Update metrics for all pools."""
+        """Update metrics for all pools, one entry at a time."""
         if not pools:
             return
 
         conn = await self.connection
+        cpi = await self.oracle_cpi
 
         for pool in pools:
             pool_pda = pool.get("pool_pda") or str(pool.get("pubkey", ""))
@@ -204,33 +205,45 @@ class OracleAgent:
 
                 logger.info(f"Updating metrics for {len(valid_entries)} entries in pool {pool_pda}")
 
-                tasks = [
-                    {
+                for entry in valid_entries:
+                    entry_pda = entry.get("entry_pda") or str(entry.get("pubkey", ""))
+                    clip_link = entry.get("clip_link", "")
+
+                    if not entry_pda or not clip_link:
+                        logger.warning(f"[update_all_metrics] Skipping entry with missing pda or clip_link")
+                        continue
+
+                    task = {
                         "platform": "youtube",
                         "user_handle": entry.get("channel_id", entry.get("user", "")),
                         "videos": [
                             {
-                                "url": entry.get("clip_link", ""),
+                                "url": clip_link,
                                 "platform": "youtube",
                             }
                         ],
                     }
-                    for entry in valid_entries
-                ]
 
-                result = await self.metrics_api.analyze_batch(tasks)
+                    logger.debug(f"[update_all_metrics] Fetching metrics for {entry_pda[:8]}... ({clip_link})")
 
-                cpi = await self.oracle_cpi
+                    try:
+                        result = await self.metrics_api.analyze_batch([task])
 
-                for summary in result.get("summary", []):
-                    for video in summary.get("videos", []):
-                        entry = next(
-                            (e for e in valid_entries if e.get("clip_link") == video.get("url")),
-                            None
-                        )
-                        if not entry:
+                        if not result:
+                            logger.warning(f"[update_all_metrics] API returned None for {entry_pda[:8]}... — skipping")
                             continue
 
+                        summaries = result.get("summary", [])
+                        if not summaries:
+                            logger.warning(f"[update_all_metrics] No summaries for {entry_pda[:8]}... — skipping")
+                            continue
+
+                        videos = summaries[0].get("videos", [])
+                        if not videos:
+                            logger.warning(f"[update_all_metrics] No videos in summary for {entry_pda[:8]}... — skipping")
+                            continue
+
+                        video = videos[0]
                         metrics = video.get("metrics", {})
                         views = metrics.get("views", 0)
                         likes = metrics.get("likes", 0)
@@ -243,26 +256,19 @@ class OracleAgent:
                         })
                         score = self._calculate_score(metrics, scoring_rules)
 
-                        entry_pda = entry.get("entry_pda") or str(entry.get("pubkey", ""))
-                        if entry_pda:
-                            link_hash = hashlib.sha256(
-                                entry.get("clip_link", "").encode()
-                            ).digest()
+                        link_hash = hashlib.sha256(clip_link.encode()).digest()
 
-                            try:
-                                tx_sig = await cpi.update_metrics(
-                                    entry_pda=entry_pda,
-                                    pool_pda=pool_pda,
-                                    views=views,
-                                    likes=likes,
-                                    comments=comments,
-                                    link_hash=link_hash,
-                                )
-                                logger.info(
-                                    f"Updated {entry_pda}: V={views} L={likes} C={comments} -> Score={score}, tx={tx_sig}"
-                                )
-                            except Exception as e:
-                                logger.error(f"Failed to update metrics: {e}")
+                        tx_sig = await cpi.update_metrics(
+                            entry_pda=entry_pda,
+                            pool_pda=pool_pda,
+                            views=views,
+                            likes=likes,
+                            comments=comments,
+                            link_hash=link_hash,
+                        )
+                        logger.info(
+                            f"Updated {entry_pda}: V={views} L={likes} C={comments} -> Score={score}, tx={tx_sig}"
+                        )
 
                         self.db.save_metrics(
                             entry_pda=entry_pda,
@@ -271,6 +277,10 @@ class OracleAgent:
                             comments=comments,
                             score=score,
                         )
+
+                    except Exception as e:
+                        logger.error(f"Failed to update metrics for {entry_pda[:8]}...: {e}")
+                        continue
 
             except Exception as e:
                 logger.error(f"Failed to update metrics for pool {pool_pda}: {e}")
