@@ -80,34 +80,43 @@ class SolanaMCPClient:
     # === Funções de Alto Nível ===
     
     async def get_global_config(self) -> dict:
-        """Busca GlobalConfig."""
-        pda, _ = self._find_pda(b"global_config_v1")
-        return await self.get_account_info(pda)
-    
-    async def get_active_pools(self) -> list[dict]:
-        """Busca pools com status = Open e não expiradas.
-
-        Uses RPC memcmp filter on VideoPool discriminator to fetch only pool accounts.
-        Returns list of VideoPool accounts com status==0 (Open) e expiryTimestamp > now.
-        Decodes Borsh-serialized data from blockchain.
-        """
+        """Busca GlobalConfig e retorna campos decodificados: admin, oracle, treasury."""
         import base64
-        import time
+        pda, _ = self._find_pda(b"global_config_v1")
+        raw = await self.get_account_info(pda)
+        if not raw or "data" not in raw or not raw["data"]:
+            return {"admin": "", "oracle": "", "treasury": ""}
+        
+        data_b64 = raw["data"][0]
+        if not data_b64:
+            return {"admin": "", "oracle": "", "treasury": ""}
+        
+        data = base64.b64decode(data_b64)
+        offset = 8  # skip discriminator
+        
+        admin = str(Pubkey(data[offset:offset+32]))
+        offset += 32
+        oracle = str(Pubkey(data[offset:offset+32]))
+        offset += 32
+        treasury = str(Pubkey(data[offset:offset+32]))
+        
+        return {"admin": admin, "oracle": oracle, "treasury": treasury}
+    
+    async def _fetch_open_pools(self) -> list[dict]:
+        """Fetch ALL pools with status==0 (Open), regardless of expiry."""
+        import base64
         import struct
         from loguru import logger
 
-        program_id = self.program_id
-        video_pool_disc = "PP5rDpEeLV6"
         raw = await self._rpc_call("getProgramAccounts", [
-            program_id,
+            self.program_id,
             {
                 "encoding": "base64",
-                "filters": [{"memcmp": {"offset": 0, "bytes": video_pool_disc}}],
+                "filters": [{"memcmp": {"offset": 0, "bytes": "PP5rDpEeLV6"}}],
             }
         ])
         accounts = raw if isinstance(raw, list) else []
-        active_pools = []
-        current_timestamp = int(time.time())
+        open_pools = []
 
         for account in accounts:
             pool_pubkey = account.get("pubkey", "unknown")
@@ -117,10 +126,9 @@ class SolanaMCPClient:
                     continue
 
                 data = base64.b64decode(data_b64)
-                offset = 8  # skip discriminator
+                offset = 8
 
-                creator_bytes = data[offset:offset+32]
-                creator = str(Pubkey(creator_bytes))
+                creator = str(Pubkey(data[offset:offset+32]))
                 offset += 32
 
                 str_len = struct.unpack('<I', data[offset:offset+4])[0]
@@ -128,33 +136,29 @@ class SolanaMCPClient:
                 video_id = data[offset:offset+str_len].decode('utf-8', errors='replace')
                 offset += str_len
 
-                offset += 32  # prize_vault
+                offset += 32
 
                 prize_amount = struct.unpack('<Q', data[offset:offset+8])[0]
-                offset += 8   # prize_amount
+                offset += 8
 
-                views_weight = struct.unpack('<H', data[offset:offset+2])[0]
-                likes_weight = struct.unpack('<H', data[offset+2:offset+4])[0]
-                comments_weight = struct.unpack('<H', data[offset+4:offset+6])[0]
                 scoring_rules = {
-                    "views_weight": views_weight,
-                    "likes_weight": likes_weight,
-                    "comments_weight": comments_weight,
+                    "views_weight": struct.unpack('<H', data[offset:offset+2])[0],
+                    "likes_weight": struct.unpack('<H', data[offset+2:offset+4])[0],
+                    "comments_weight": struct.unpack('<H', data[offset+4:offset+6])[0],
                 }
-                offset += 6   # scoring_rules (3x u16)
+                offset += 6
 
                 status = data[offset]
                 participant_count = struct.unpack('<I', data[offset+1:offset+5])[0]
-                offset += 5   # status + participant_count (u32)
+                offset += 5
 
                 total_score = struct.unpack('<Q', data[offset:offset+8])[0]
-                offset += 8   # total_score
+                offset += 8
 
                 expiry_timestamp = struct.unpack('<q', data[offset:offset+8])[0]
 
-                if status == 0 and expiry_timestamp > current_timestamp:
-                    logger.info(f"[{pool_pubkey}] ACTIVE POOL FOUND! status=0, expiry={expiry_timestamp}, creator={creator}, video_id={video_id}")
-                    active_pools.append({
+                if status == 0:
+                    pool = {
                         "pubkey": pool_pubkey,
                         "pool_pda": pool_pubkey,
                         "creator": creator,
@@ -166,12 +170,35 @@ class SolanaMCPClient:
                         "scoring_rules": scoring_rules,
                         "participant_count": participant_count,
                         "total_score": total_score,
-                    })
+                    }
+                    open_pools.append(pool)
             except Exception:
                 continue
 
-        logger.info(f"[get_active_pools] Found {len(active_pools)} active pools")
-        return active_pools
+        logger.info(f"[_fetch_open_pools] Found {len(open_pools)} open pools")
+        return open_pools
+
+    async def get_active_pools(self) -> list[dict]:
+        """Busca pools com status = Open e não expiradas."""
+        import time
+        from loguru import logger
+
+        pools = await self._fetch_open_pools()
+        current_timestamp = int(time.time())
+        active = [p for p in pools if p["expiry_timestamp"] > current_timestamp]
+        logger.info(f"[get_active_pools] Found {len(active)} active pools")
+        return active
+
+    async def get_expired_pools(self) -> list[dict]:
+        """Busca pools com status = Open e expiradas (precisam de close_and_payout)."""
+        import time
+        from loguru import logger
+
+        pools = await self._fetch_open_pools()
+        current_timestamp = int(time.time())
+        expired = [p for p in pools if p["expiry_timestamp"] <= current_timestamp]
+        logger.info(f"[get_expired_pools] Found {len(expired)} expired pools")
+        return expired
 
     async def get_pool_by_pda(self, pool_pda: str) -> dict:
         """Fetch a single pool by PDA and parse all fields."""
@@ -535,6 +562,11 @@ class SolanaMCPClientLocal:
         """Busca pools ativas via MCP."""
         client = SolanaMCPClient(self.rpc_url, self.program_id)
         return await client.get_active_pools()
+
+    async def get_expired_pools(self) -> list[dict]:
+        """Busca pools expiradas via MCP."""
+        client = SolanaMCPClient(self.rpc_url, self.program_id)
+        return await client.get_expired_pools()
 
 
 # Alias para compatibilidade

@@ -54,9 +54,8 @@ class SolanaConnection:
         return Pubkey.find_program_address(list(seeds), self.program_id)
 
     async def get_global_config(self) -> dict:
-        """Get GlobalConfig account."""
-        pda, _ = self._find_pda(b"global_config_v1")
-        return await self.mcp_client.get_account_info(str(pda))
+        """Get GlobalConfig account (parsed)."""
+        return await self.mcp_client.get_global_config()
 
     async def get_account_info(self, pubkey: str) -> dict:
         """Get account info."""
@@ -67,8 +66,16 @@ class SolanaConnection:
         return await self.mcp_client.get_program_accounts(program_id)
 
     async def get_active_pools(self) -> list:
-        """Get active (Open) pools."""
+        """Get active (Open, non-expired) pools."""
         return await self.mcp_client.get_active_pools()
+
+    async def get_expired_pools(self) -> list:
+        """Get expired (Open, past deadline) pools that need close_and_payout."""
+        return await self.mcp_client.get_expired_pools()
+
+    async def get_pool_by_pda(self, pool_pda: str) -> dict:
+        """Get parsed pool data from a specific PDA."""
+        return await self.mcp_client.get_pool_by_pda(pool_pda)
 
     async def get_entries_for_pool(self, pool_pda: str) -> list:
         """Get participant entries for a pool."""
@@ -77,7 +84,7 @@ class SolanaConnection:
     async def get_entry_pda(self, pool_pda: str, clip_link: str) -> tuple[str, int]:
         """Get ParticipantEntry PDA for a clip link."""
         link_hash = hashlib.sha256(clip_link.encode()).digest()
-        pool_bytes = Pubkey.from_string(pool_pda).to_bytes()
+        pool_bytes = bytes(Pubkey.from_string(pool_pda))
         return self._find_pda(b"entry", pool_bytes, link_hash)
 
     async def get_user_profile_pda(self, authority: str) -> tuple[str, int]:
@@ -156,7 +163,7 @@ class OracleCPI:
                 from solders.pubkey import Pubkey
                 program_pubkey = Pubkey.from_string(self.program_id)
                 self._program = Program(idl, program_pubkey, provider)
-            except ImportError:
+            except Exception:
                 return None
         return self._program
 
@@ -286,11 +293,11 @@ class OracleCPI:
         user_authority_pk = Pubkey.from_string(user_authority)
         
         user_profile, _ = Pubkey.find_program_address(
-            [b"user_profile", user_authority_pk.to_bytes()],
+            [b"user_profile", bytes(user_authority_pk)],
             conn.program_id
         )
         stake_account, _ = Pubkey.find_program_address(
-            [b"stake", user_authority_pk.to_bytes()],
+            [b"stake", bytes(user_authority_pk)],
             conn.program_id
         )
         
@@ -320,11 +327,11 @@ class OracleCPI:
         user_authority_pk = Pubkey.from_string(user_authority)
         
         user_profile, _ = Pubkey.find_program_address(
-            [b"user_profile", user_authority_pk.to_bytes()],
+            [b"user_profile", bytes(user_authority_pk)],
             program_id
         )
         stake_account, _ = Pubkey.find_program_address(
-            [b"stake", user_authority_pk.to_bytes()],
+            [b"stake", bytes(user_authority_pk)],
             program_id
         )
         
@@ -380,11 +387,14 @@ class OracleCPI:
         conn = self.connection
         pool = Pubkey.from_string(pool_pda)
         
-        pool_data = await conn.get_account_info(pool_pda)
-        creator = Pubkey.from_string(pool_data.get("creator", ""))
+        pool_parsed = await conn.get_pool_by_pda(pool_pda)
+        creator_str = pool_parsed.get("creator", "")
+        if not creator_str:
+            return "tx-error: Could not parse pool creator"
+        creator = Pubkey.from_string(creator_str)
         
         vault, _ = Pubkey.find_program_address(
-            [b"vault", pool.to_bytes()],
+            [b"vault", bytes(pool)],
             conn.program_id
         )
         
@@ -415,11 +425,14 @@ class OracleCPI:
         program_id = Pubkey.from_string(self.program_id)
         pool = Pubkey.from_string(pool_pda)
         
-        pool_data = await self.connection.get_account_info(pool_pda)
-        creator = Pubkey.from_string(pool_data.get("creator", ""))
+        pool_parsed = await self.connection.get_pool_by_pda(pool_pda)
+        creator_str = pool_parsed.get("creator", "")
+        if not creator_str:
+            return "tx-error: Could not parse pool creator"
+        creator = Pubkey.from_string(creator_str)
         
         vault, _ = Pubkey.find_program_address(
-            [b"vault", pool.to_bytes()],
+            [b"vault", bytes(pool)],
             program_id
         )
         

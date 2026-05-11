@@ -401,10 +401,9 @@ class OracleAgent:
         while self.running:
             try:
                 pools = await self.check_active_pools()
+                conn = await self.connection
 
                 if pools:
-                    conn = await self.connection
-
                     for pool in pools:
                         pool_pda = pool.get("pool_pda") or str(pool.get("pubkey", ""))
                         if not pool_pda:
@@ -484,8 +483,10 @@ class OracleAgent:
                     # Update metrics for all pools (entries with score > 0)
                     await self.update_all_metrics(pools)
 
-                    # Close expired pools
-                    await self.check_expired_pools(pools)
+                # Close expired pools — runs even when there are no active pools
+                expired_pools = await conn.get_expired_pools()
+                if expired_pools:
+                    await self.check_expired_pools(expired_pools)
 
                 await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
 
