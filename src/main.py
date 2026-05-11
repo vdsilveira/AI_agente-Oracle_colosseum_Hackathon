@@ -16,7 +16,6 @@ from .services.metrics_api_client import MetricsApiClient
 from .services.alert_service import AlertService
 from .db.database import Database
 from .solana.connection import SolanaConnection, OracleCPI, create_oracle_connection
-from .utils.proxy_helper import is_proxy_configured
 
 
 class OracleAgent:
@@ -198,11 +197,18 @@ class OracleAgent:
         except Exception as e:
             logger.warning(f"Failed to sync entry to core-api: {e}")
 
+    @staticmethod
+    def _map_pool_status(raw_status: int) -> str:
+        """Map on-chain status int to string."""
+        return {0: "OPEN", 1: "CLOSED", 2: "DISTRIBUTED"}.get(raw_status, "OPEN")
+
     async def _sync_pool_to_core(self, pool_pda: str, pool: dict):
         """Sync pool data to core-api DB."""
         if not config.CORE_API_URL:
             return
         try:
+            raw_status = pool.get("status", 0)
+            status_str = self._map_pool_status(raw_status if isinstance(raw_status, int) else 0)
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.post(
                     f"{config.CORE_API_URL}/pools/sync",
@@ -218,10 +224,11 @@ class OracleAgent:
                         }),
                         "participant_count": pool.get("participant_count", 0),
                         "total_score": pool.get("total_score", 0),
-                        "status": "OPEN",
+                        "status": status_str,
                         "expiry_timestamp": datetime.fromtimestamp(
                             pool.get("expiry_timestamp", 0), tz=timezone.utc
                         ).isoformat(),
+                        "video_title": pool.get("video_title") or None,
                     },
                 )
                 if resp.status_code != 200:
@@ -357,6 +364,12 @@ class OracleAgent:
                         logger.error(f"Failed to update metrics for {entry_pda[:8]}...: {e}")
                         continue
 
+                # After all entries processed, re-fetch pool from chain and sync to core-api
+                fresh_pool = await conn.get_pool_by_pda(pool_pda)
+                if fresh_pool:
+                    await self._sync_pool_to_core(pool_pda, fresh_pool)
+                    logger.info(f"Synced pool {pool_pda} to core-api: total_score={fresh_pool.get('total_score', 0)}")
+
             except Exception as e:
                 logger.error(f"Failed to update metrics for pool {pool_pda}: {e}")
 
@@ -449,6 +462,11 @@ class OracleAgent:
                                         f"Initialized on-chain score for {entry_pda}: "
                                         f"V={views} L={likes} C={comments}, tx={tx_sig}"
                                     )
+                                    score = self._calculate_score(metrics, pool.get("scoring_rules", {
+                                        "views_weight": 5000,
+                                        "likes_weight": 3000,
+                                        "comments_weight": 2000,
+                                    }))
                                     await self._sync_entry_to_core(entry, pool_pda, views, likes, comments, score)
                                     await self._sync_pool_to_core(pool_pda, pool)
                                 except asyncio.TimeoutError:
@@ -521,7 +539,7 @@ class OracleAgent:
                 (views * views_weight) +
                 (likes * likes_weight) +
                 (comments * comments_weight)
-            ) // 10000
+            )
         else:
             score = int(views + likes * 10 + comments * 50)
 
@@ -531,11 +549,6 @@ class OracleAgent:
 async def main():
     """Main entry point."""
     logger.info("Starting Oracle Agent...")
-
-    if is_proxy_configured():
-        logger.info(f"HTTP proxy configured: HTTPS_PROXY={'set' if config.HTTPS_PROXY else 'not set'}")
-    else:
-        logger.warning("No HTTP proxy configured - YouTube requests may be blocked")
 
     try:
         config.validate()

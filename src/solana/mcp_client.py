@@ -129,12 +129,25 @@ class SolanaMCPClient:
                 offset += str_len
 
                 offset += 32  # prize_vault
+
+                prize_amount = struct.unpack('<Q', data[offset:offset+8])[0]
                 offset += 8   # prize_amount
+
+                views_weight = struct.unpack('<H', data[offset:offset+2])[0]
+                likes_weight = struct.unpack('<H', data[offset+2:offset+4])[0]
+                comments_weight = struct.unpack('<H', data[offset+4:offset+6])[0]
+                scoring_rules = {
+                    "views_weight": views_weight,
+                    "likes_weight": likes_weight,
+                    "comments_weight": comments_weight,
+                }
                 offset += 6   # scoring_rules (3x u16)
 
                 status = data[offset]
+                participant_count = struct.unpack('<I', data[offset+1:offset+5])[0]
                 offset += 5   # status + participant_count (u32)
 
+                total_score = struct.unpack('<Q', data[offset:offset+8])[0]
                 offset += 8   # total_score
 
                 expiry_timestamp = struct.unpack('<q', data[offset:offset+8])[0]
@@ -149,12 +162,77 @@ class SolanaMCPClient:
                         "expiryTimestamp": expiry_timestamp,
                         "expiry_timestamp": expiry_timestamp,
                         "original_video_id": video_id,
+                        "prize_amount": prize_amount,
+                        "scoring_rules": scoring_rules,
+                        "participant_count": participant_count,
+                        "total_score": total_score,
                     })
             except Exception:
                 continue
 
         logger.info(f"[get_active_pools] Found {len(active_pools)} active pools")
         return active_pools
+
+    async def get_pool_by_pda(self, pool_pda: str) -> dict:
+        """Fetch a single pool by PDA and parse all fields."""
+        import base64
+        import struct
+        from loguru import logger
+
+        raw = await self.get_account_info(pool_pda)
+        if not raw or "data" not in raw or not raw["data"]:
+            return {}
+
+        data_b64 = raw["data"][0]
+        if not data_b64:
+            return {}
+
+        data = base64.b64decode(data_b64)
+        offset = 8  # skip discriminator
+
+        creator = str(Pubkey(data[offset:offset+32]))
+        offset += 32
+
+        str_len = struct.unpack('<I', data[offset:offset+4])[0]
+        offset += 4
+        video_id = data[offset:offset+str_len].decode('utf-8', errors='replace')
+        offset += str_len
+
+        offset += 32  # prize_vault
+
+        prize_amount = struct.unpack('<Q', data[offset:offset+8])[0]
+        offset += 8
+
+        views_weight = struct.unpack('<H', data[offset:offset+2])[0]
+        likes_weight = struct.unpack('<H', data[offset+2:offset+4])[0]
+        comments_weight = struct.unpack('<H', data[offset+4:offset+6])[0]
+        scoring_rules = {"views_weight": views_weight, "likes_weight": likes_weight, "comments_weight": comments_weight}
+        offset += 6
+
+        status = data[offset]
+        participant_count = struct.unpack('<I', data[offset+1:offset+5])[0]
+        offset += 5
+
+        total_score = struct.unpack('<Q', data[offset:offset+8])[0]
+        offset += 8
+
+        expiry_timestamp = struct.unpack('<q', data[offset:offset+8])[0]
+
+        logger.info(f"[get_pool_by_pda] {pool_pda}: status={status}, total_score={total_score}, participants={participant_count}")
+
+        return {
+            "pubkey": pool_pda,
+            "pool_pda": pool_pda,
+            "creator": creator,
+            "status": status,
+            "expiryTimestamp": expiry_timestamp,
+            "expiry_timestamp": expiry_timestamp,
+            "original_video_id": video_id,
+            "prize_amount": prize_amount,
+            "scoring_rules": scoring_rules,
+            "participant_count": participant_count,
+            "total_score": total_score,
+        }
     
     async def get_entries_for_pool(self, pool_pda: str) -> list[dict]:
         """Busca participant entries de uma pool específica.

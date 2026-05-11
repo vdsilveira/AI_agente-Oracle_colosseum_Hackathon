@@ -482,7 +482,7 @@ def calculate_score(
         (views * views_weight) +
         (likes * likes_weight) +
         (comments * comments_weight)
-    ) // 10000
+    )
     
     return score
 
