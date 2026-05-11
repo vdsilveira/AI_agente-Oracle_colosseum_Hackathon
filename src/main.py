@@ -404,6 +404,12 @@ class OracleAgent:
                 conn = await self.connection
 
                 if pools:
+                    # Sync all active pools to core-api (even those with no entries)
+                    for pool in pools:
+                        pool_pda = pool.get("pool_pda") or str(pool.get("pubkey", ""))
+                        if pool_pda:
+                            await self._sync_pool_to_core(pool_pda, pool)
+
                     for pool in pools:
                         pool_pda = pool.get("pool_pda") or str(pool.get("pubkey", ""))
                         if not pool_pda:
