@@ -274,6 +274,7 @@ class OracleAgent:
                 continue
 
             try:
+                await asyncio.sleep(2)  # rate-limit: delay between pools
                 entries = await conn.get_entries_for_pool(pool_pda)
                 valid_entries = [
                     e for e in entries
@@ -417,6 +418,7 @@ class OracleAgent:
 
                         video_a_id = pool.get("original_video_id", "")
 
+                        await asyncio.sleep(1)  # rate-limit: delay between pools
                         # Process new entries that need first-time validation
                         new_entries = await self.check_new_entries(pool_pda)
 
